@@ -104,6 +104,10 @@ enum class BooleanKey(
     // pre-meal low target live ~45-60 min before a habitual meal. Default OFF = shadow (logs
     // "V6 pre-meal WOULD apply" to reason for validation; no dosing change). See MealTimeLearner.
     ApsBoostV6PreMealTarget("boost_v6_pre_meal_target", false, defaultedBySM = true),
+    // Manual MEAL chip on the Boost Overview. A tap is a real, unfiltered meal event: it is recorded
+    // into MealTimeLearner and opens the V6 pre-meal window for MANUAL_MEAL_WINDOW_MIN. Default OFF —
+    // user opts in (Preferences → Boost → Advanced).
+    ApsBoostShowMealButton("boost_show_meal_button", false, defaultedBySM = true),
     // 2026-06-16 fast-carb fast-path — single-cycle OBSERVING/IDLE→CONFIRMED on a sharp, accelerating,
     // score-corroborated rise while awake & not exercising. Replay-validated (backtesting/replay.py).
     // Default ON (it's the fix for the 2026-06-16 fast-carb crash); toggle OFF = instant revert.

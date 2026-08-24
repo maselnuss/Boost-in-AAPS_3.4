@@ -1030,6 +1030,7 @@ open class OpenAPSBoostV5Plugin @Inject constructor(
         category.addPreference(AdaptiveUnitPreference(ctx = context, unitKey = UnitDoubleKey.ApsBoostNightModeBgOffset, dialogMessage = R.string.boost_night_mode_bg_offset_summary, title = R.string.boost_night_mode_bg_offset_title))
         category.addPreference(AdaptiveSwitchPreference(ctx = context, booleanKey = BooleanKey.ApsUseSmb, summary = R.string.enable_smb_summary, title = R.string.enable_smb))
         category.addPreference(AdaptiveSwitchPreference(ctx = context, booleanKey = BooleanKey.ApsUseUam, summary = R.string.enable_uam_summary, title = R.string.enable_uam))
+        category.addPreference(AdaptiveSwitchPreference(ctx = context, booleanKey = BooleanKey.ApsBoostShowMealButton, summary = R.string.boost_show_meal_button_summary, title = R.string.boost_show_meal_button_title))
 
         // ── Advanced — advanced V6 dosing knobs + the full grouped-by-function engine tree.
         //    Build it fully BEFORE attaching to the category. ──

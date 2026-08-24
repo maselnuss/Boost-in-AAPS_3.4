@@ -29,5 +29,9 @@ enum class LongNonKey(
     // preferences are bypassed, so requests are confined to a genuinely new install rather than any
     // later moment history happens to look thin (a long pump break, a deleted history, a sensor swap).
     ApsBoostHistorySyncFirstSeenMs("boost_history_sync_first_seen_ms", 0L),
+
+    // Timestamp of the last manual MEAL button tap (epoch ms). Written by BoostOverviewV2Fragment on
+    // tap, read by OpenAPSBoostPlugin's next cycle. Internal UI→loop bridge, not a Settings toggle.
+    ApsBoostLastMealTapMs("boost_last_meal_tap_ms", 0L),
 }
 

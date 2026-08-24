@@ -70,6 +70,7 @@ import app.aaps.core.interfaces.utils.fabric.FabricPrivacy
 import app.aaps.core.keys.BooleanKey
 import app.aaps.core.keys.IntKey
 import app.aaps.core.keys.IntNonKey
+import app.aaps.core.keys.LongNonKey
 import app.aaps.core.keys.UnitDoubleKey
 import app.aaps.core.keys.interfaces.Preferences
 import app.aaps.core.objects.extensions.round
@@ -237,6 +238,9 @@ class BoostOverviewV2Fragment : DaggerFragment(), View.OnClickListener {
         binding.v2BtnTreatment.setOnClickListener(this)
         binding.v2BtnCalibration.setOnClickListener(this)
         binding.v2BtnCgm.setOnClickListener(this)
+
+        // MEAL button (pref ApsBoostShowMealButton)
+        binding.v2BtnMeal.setOnClickListener(this)
 
         // Target value tap -> temp target dialog
         binding.v2TargetValue.setOnClickListener(this)
@@ -1039,6 +1043,8 @@ class BoostOverviewV2Fragment : DaggerFragment(), View.OnClickListener {
         binding.v2BtnCgm.visibility =
             (preferences.get(BooleanKey.OverviewShowCgmButton) && (xDripSource.isEnabled() || dexcomBoyda.isEnabled())).toVisibility()
 
+        binding.v2MealRow.visibility = preferences.get(BooleanKey.ApsBoostShowMealButton).toVisibility()
+
         // Show the included standard layout when accept-temp, quick-wizard, or any user action is present.
         val anyVisible = binding.v2ButtonsLayout.acceptTempButton.visibility == View.VISIBLE ||
             binding.v2ButtonsLayout.quickWizardButton.visibility == View.VISIBLE ||
@@ -1208,6 +1214,33 @@ class BoostOverviewV2Fragment : DaggerFragment(), View.OnClickListener {
                 R.id.v2_btn_cgm -> {
                     if (xDripSource.isEnabled()) openCgmApp("com.eveningoutpost.dexdrip")
                     else if (dexcomBoyda.isEnabled()) dexcomBoyda.dexcomPackages().forEach { openCgmApp(it) }
+                }
+
+                R.id.v2_btn_meal -> {
+                    // Only persist the tap timestamp: OpenAPSBoostPlugin is the single writer of the
+                    // meal-time history and picks the tap up in the next cycle.
+                    val tapNow = dateUtil.now()
+                    preferences.put(LongNonKey.ApsBoostLastMealTapMs, tapNow)
+                    aapsLogger.debug(LTag.APS, "Boost MEAL button tapped at ${dateUtil.dateAndTimeString(tapNow)}")
+                    // Force a cycle now instead of waiting for the next scheduled one, so the tap
+                    // takes effect immediately and the UI can confirm it.
+                    handler.post { loop.invoke("BoostMealTap", allowNotification = false) }
+                    handler.postDelayed({ refreshAll() }, 1500L)
+                    // Instant local confirmation: briefly recolor the button amber and show LOGGED.
+                    val flashColor = Color.parseColor("#ffb300")
+                    binding.v2BtnMealLabel.text = "LOGGED"
+                    binding.v2BtnMeal.setCardBackgroundColor(Color.parseColor("#33ffb300"))
+                    binding.v2BtnMeal.strokeColor = Color.parseColor("#4dffb300")
+                    binding.v2BtnMealIcon.setColorFilter(flashColor)
+                    binding.v2BtnMealLabel.setTextColor(flashColor)
+                    binding.v2BtnMealLabel.postDelayed({
+                        val normalColor = Color.parseColor("#00d4ff")
+                        binding.v2BtnMealLabel.text = "MEAL"
+                        binding.v2BtnMeal.setCardBackgroundColor(Color.parseColor("#1a00d4ff"))
+                        binding.v2BtnMeal.strokeColor = Color.parseColor("#2600d4ff")
+                        binding.v2BtnMealIcon.setColorFilter(normalColor)
+                        binding.v2BtnMealLabel.setTextColor(normalColor)
+                    }, 2000L)
                 }
 
                 // AID status tap -> loop dialog

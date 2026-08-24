@@ -110,6 +110,8 @@
     <string name="boost_v6_pre_meal_target_mgdl_summary">The low target applied during the pre-meal window. Lower = more pre-emptive insulin. Default: 72 mg/dL (4.0 mmol).</string>
     <string name="boost_v6_pre_meal_lead_min_title">V6 pre-meal lead time (min)</string>
     <string name="boost_v6_pre_meal_lead_min_summary">How many minutes before a learned meal the low target window OPENS. It closes 45 min before the meal. Default: 60 min.</string>
+    <string name="boost_show_meal_button_title">Show MEAL button</string>
+    <string name="boost_show_meal_button_summary">Adds a MEAL button to the Overview. Tap it the moment you start eating. Two separate effects: (1) the tap is recorded as a real meal event for the meal-time learner (always, no dosing effect). (2) For 45 minutes it opens the V6 pre-meal window above: with V6 anticipatory pre-meal target ON this lowers the live target (lower-only, never during exercise/recovery); with it OFF it is only logged (WOULD apply).</string>
     <string name="boost_start_title">Boost Start Time</string>
     <string name="boost_start_summary">Start of the Boost active window (24h format HH:mm). Default: 07:00</string>
     <string name="boost_end_title">Boost End Time</string>

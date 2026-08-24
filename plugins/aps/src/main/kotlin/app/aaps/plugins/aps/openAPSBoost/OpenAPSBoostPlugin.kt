@@ -59,6 +59,7 @@ import app.aaps.core.keys.BooleanKey
 import app.aaps.core.keys.DoubleKey
 import app.aaps.core.keys.IntKey
 import app.aaps.core.keys.IntentKey
+import app.aaps.core.keys.LongNonKey
 import app.aaps.core.keys.StringKey
 import app.aaps.core.keys.UnitDoubleKey
 import app.aaps.core.keys.interfaces.Preferences
@@ -197,6 +198,21 @@ open class OpenAPSBoostPlugin @Inject constructor(
     }
 
     companion object {
+        /**
+         * How long a manual MEAL tap keeps the V6 pre-meal window open, counting FORWARD from the tap.
+         * A tap means "I'm eating now", unlike the learned path whose window closes
+         * [MealTimeLearner.PRE_MEAL_LEAD_MIN_FLOOR] min BEFORE a predicted meal centre.
+         */
+        const val MANUAL_MEAL_WINDOW_MIN = 45
+
+        /** Minutes since [lastTapMs], or [Int.MAX_VALUE] if never tapped ([lastTapMs] == 0). */
+        internal fun manualTapAgeMin(nowMs: Long, lastTapMs: Long): Int =
+            if (lastTapMs > 0) ((nowMs - lastTapMs) / 60_000L).toInt() else Int.MAX_VALUE
+
+        /** Is a tap at [lastTapMs] within [windowMin] of [nowMs]? A tap in the future (clock change) is never active. */
+        internal fun manualTapActive(nowMs: Long, lastTapMs: Long, windowMin: Int = MANUAL_MEAL_WINDOW_MIN): Boolean =
+            manualTapAgeMin(nowMs, lastTapMs) in 0..windowMin
+
         /**
          * Picks the sensitivity ratio that scales basal / targets / CR in determine_basal.
          * TDD-DynISF and traditional oref autosens are alternative adaptation mechanisms — never both:
@@ -1490,11 +1506,12 @@ open class OpenAPSBoostPlugin @Inject constructor(
         val recentSteps60Min = StepService.getRecentStepCount60Min()
 
         // 7b. V6 anticipatory pre-meal low target (shadow-first).
-        // Learned habitual meal times (from V5 CONFIRMED commits) lower the target ~45-60 min
-        // before a meal so insulinReq is already elevated when carbs land. Exercise and
+        // Learned habitual meal times (from V5 CONFIRMED commits) OR a manual MEAL button tap lower
+        // the target so insulinReq is already elevated when carbs land. Exercise and
         // post-exercise recovery OVERRIDE this (activity raises the target; we only fire when not
         // active and not recovering). LOWER-ONLY: never raises a target. Shadow gate — when
-        // ApsBoostV6PreMealTarget is OFF we only log "WOULD apply" for NS validation, no change.
+        // ApsBoostV6PreMealTarget is OFF we only log "WOULD apply" for NS validation, no change;
+        // this applies identically to both trigger sources.
         var v6MinBg = activityResult.minBg
         var v6MaxBg = activityResult.maxBg
         var v6TargetBg = activityResult.targetBg
@@ -1504,7 +1521,37 @@ open class OpenAPSBoostPlugin @Inject constructor(
             val nowMin = nowLocal.hour * 60 + nowLocal.minute
             val offsetMs = java.time.ZoneId.systemDefault().rules.getOffset(java.time.Instant.now()).totalSeconds * 1000L
             val leadMaxMin = preferences.getBoostDosing(DoubleKey.ApsBoostV6PreMealLeadMin).toInt()
-            val hit = MealTimeLearner.preMealWindow(mealTimeHistoryCached, nowMin, offsetMs, leadMaxMin) ?: return@run
+            // Day-type-aware: judge "now" only against modes clustered for the same WEEKDAY/SATURDAY/
+            // SUNDAY, so a Sunday-only ~13:00 pattern isn't diluted by unrelated weekday events. Same
+            // (now, offsetMs) arithmetic MealTimeLearner uses internally for historical events.
+            val nowDayType = MealTimeLearner.dayTypeOf(now, offsetMs)
+            val learnedHit = MealTimeLearner.preMealWindow(mealTimeHistoryCached, nowMin, offsetMs, leadMaxMin, nowDayType)
+
+            // Manual MEAL tap: recorded into the history unconditionally (it is training data,
+            // independent of whether exercise suppresses the target below). Dedup against the
+            // persisted history itself so it stays restart-safe, and ignore a tap within
+            // MIN_TAP_GAP_MIN of an existing event (accidental double-tap).
+            val lastMealTapMs = preferences.get(LongNonKey.ApsBoostLastMealTapMs)
+            if (lastMealTapMs > 0 && lastMealTapMs !in mealTimeHistoryCached.events) {
+                val tooSoonAfterRecordedEvent = mealTimeHistoryCached.events.any {
+                    kotlin.math.abs(it - lastMealTapMs) < MealTimeLearner.MIN_TAP_GAP_MIN * 60_000L
+                }
+                if (tooSoonAfterRecordedEvent) {
+                    aapsLogger.debug(LTag.APS, "V6 meal-time learner: ignored tap @ ${dateUtil.dateAndTimeString(lastMealTapMs)} — within ${MealTimeLearner.MIN_TAP_GAP_MIN}min of a recorded event")
+                } else {
+                    mealTimeHistoryCached = MealTimeLearner.record(mealTimeHistoryCached, lastMealTapMs)
+                    preferences.put(StringKey.ApsBoostMealTimeHistory, mealTimeHistoryCached.serialize())
+                    aapsLogger.debug(LTag.APS, "V6 meal-time learner: recorded MANUAL tap @ ${dateUtil.dateAndTimeString(lastMealTapMs)} (${mealTimeHistoryCached.events.size} events)")
+                }
+            }
+            val tapAgeMin = manualTapAgeMin(now, lastMealTapMs)
+            val isManualTapActive = manualTapActive(now, lastMealTapMs)
+
+            val triggerDesc = when {
+                learnedHit != null -> "learned ~${formatClockMin(learnedHit.mode.centreMin)}, ${learnedHit.minutesBeforeMeal}min before, ${learnedHit.mode.distinctDays}d"
+                isManualTapActive  -> "manual tap ${tapAgeMin}min ago"
+                else               -> return@run
+            }
             val exerciseNow = activityResult.activityState in setOf("ACTIVE", "VIGOROUS_AEROBIC", "MODERATE_AEROBIC", "LIGHT_AEROBIC", "RESISTANCE", "STRESS")
             val inRecovery = postExerciseRecoveryEnabled && now < recoveryWindowEnd
             if (exerciseNow || inRecovery) {
@@ -1512,18 +1559,17 @@ open class OpenAPSBoostPlugin @Inject constructor(
                 return@run
             }
             val preMealTarget = preferences.getBoostDosing(DoubleKey.ApsBoostV6PreMealTargetMgdl)
-            val mealClock = formatClockMin(hit.mode.centreMin)
             v6PreMealReason = if (preferences.getBoostDosing(BooleanKey.ApsBoostV6PreMealTarget)) {
                 if (preMealTarget < v6TargetBg) {   // lower-only
                     v6MinBg = minOf(v6MinBg, preMealTarget)
                     v6MaxBg = minOf(v6MaxBg, preMealTarget)
                     v6TargetBg = preMealTarget
-                    "V6 pre-meal ACTIVE target=${preMealTarget.toInt()} (learned ~$mealClock, ${hit.minutesBeforeMeal}min before, ${hit.mode.distinctDays}d); "
+                    "V6 pre-meal ACTIVE target=${preMealTarget.toInt()} ($triggerDesc); "
                 } else {
                     "V6 pre-meal skipped (target ${preMealTarget.toInt()} ≥ current ${v6TargetBg.toInt()}); "
                 }
             } else {
-                "V6 pre-meal WOULD apply ${preMealTarget.toInt()} (learned ~$mealClock, ${hit.minutesBeforeMeal}min before, ${hit.mode.distinctDays}d); "
+                "V6 pre-meal WOULD apply ${preMealTarget.toInt()} ($triggerDesc); "
             }
         }
 
