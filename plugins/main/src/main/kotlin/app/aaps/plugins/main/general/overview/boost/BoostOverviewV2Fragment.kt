@@ -69,6 +69,7 @@ import app.aaps.core.interfaces.utils.fabric.FabricPrivacy
 import app.aaps.core.keys.BooleanKey
 import app.aaps.core.keys.IntKey
 import app.aaps.core.keys.IntNonKey
+import app.aaps.core.keys.LongNonKey
 import app.aaps.core.keys.UnitDoubleKey
 import app.aaps.core.keys.interfaces.Preferences
 import app.aaps.core.objects.extensions.round
@@ -1159,13 +1160,18 @@ class BoostOverviewV2Fragment : DaggerFragment(), View.OnClickListener {
                 }
 
                 // Meal/Alcohol confirmation buttons (Konzept 6, 2026-08-24).
-                // Step 3 of the build plan: UI-only for now — visible, tappable, logs the tap, no
-                // target/dosing effect yet. Step 4 (Essen) / Step 6 (Alkohol) wire the actual
-                // shadow-first logic into these two branches.
                 R.id.v2_btn_meal -> {
-                    aapsLogger.debug(LTag.APS, "Boost MEAL button tapped (UI-only, Konzept 6 step 3 — no target change yet)")
+                    // Step 4 (2026-08-24): only persist the tap timestamp here — the Fragment does
+                    // NOT compute or touch dosing itself. OpenAPSBoostPlugin's next cycle(s) read this
+                    // and run the actual (shadow-first) pre-meal logic. Single-writer principle: only
+                    // the Plugin ever mutates MealTimeLearner's History, so writing just the raw
+                    // timestamp here (not a History update) avoids any cross-class cache race.
+                    val tapNow = dateUtil.now()
+                    preferences.put(LongNonKey.ApsBoostLastMealTapMs, tapNow)
+                    aapsLogger.debug(LTag.APS, "Boost MEAL button tapped at ${dateUtil.dateAndTimeString(tapNow)} — next APS cycle will run the shadow pre-meal check")
                 }
                 R.id.v2_btn_alcohol -> {
+                    // Step 6 (Alkohol shadow logic) not built yet — stays UI-only for now.
                     aapsLogger.debug(LTag.APS, "Boost ALC button tapped (UI-only, Konzept 6 step 3 — no SMB damping yet)")
                 }
 
