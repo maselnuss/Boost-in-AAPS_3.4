@@ -192,6 +192,13 @@
     <string name="boost_hc_grant_title">Grant Health Connect access</string>
     <string name="boost_hc_grant_summary">Tap to request the Read Heart Rate permission. Until granted, AAPS does not appear in the Health Connect app list. After granting, the poll interval setting controls ingest cadence.</string>
 
+    <string name="boost_meal_alcohol_buttons_title">Meal/Alcohol Buttons</string>
+    <string name="boost_meal_alcohol_buttons_summary">Manual Overview buttons for meal and alcohol confirmation (Konzept 6) — shadow-first, no dosing change until validated</string>
+    <string name="boost_show_meal_button_title">Show MEAL button</string>
+    <string name="boost_show_meal_button_summary">Adds a MEAL chip to the Overview bottom row. Tap it the moment you start eating — sets the pre-meal target and trains MealTimeLearner, independent of any learned time window</string>
+    <string name="boost_show_alcohol_button_title">Show ALC button</string>
+    <string name="boost_show_alcohol_button_summary">Adds an ALC chip to the Overview bottom row. Tap it as soon as you start drinking (incl. mixed/diluted drinks like Radler) — no learnable time pattern exists, so this is the sole trigger</string>
+
     <string name="boost_post_exercise_recovery_title">Post-Exercise Recovery</string>
     <string name="boost_post_exercise_recovery_enabled_title">Enable Post-Exercise Recovery</string>
     <string name="boost_post_exercise_recovery_enabled_summary">Automatically set a high TempTarget and reduce SMB aggressiveness after exercise to guard against delayed hypoglycemia</string>

@@ -92,6 +92,14 @@ enum class BooleanKey(
     // pre-meal low target live ~45-60 min before a habitual meal. Default OFF = shadow (logs
     // "V6 pre-meal WOULD apply" to reason for validation; no dosing change). See MealTimeLearner.
     ApsBoostV6PreMealTarget("boost_v6_pre_meal_target", false, defaultedBySM = true),
+    // 2026-08-24 Meal/Alcohol confirmation buttons (Overview) — manual, always-visible chips.
+    // MEAL: primary trigger for the pre-meal target (replaces automatic V6 firing); every tap is
+    // an unfiltered positive training sample for MealTimeLearner, independent of any learned window.
+    // ALC: sole trigger for the alcohol SMB-damping shadow (no learnable time pattern exists — the
+    // 4-Bier-Nacht started 23:00, outside any known evening cluster). Default OFF — new, unproven
+    // UI surface; user opts in explicitly (Preferences → Boost → Meal/Alcohol Buttons).
+    ApsBoostShowMealButton("boost_show_meal_button", false, defaultedBySM = true),
+    ApsBoostShowAlcoholButton("boost_show_alcohol_button", false, defaultedBySM = true),
     // 2026-06-16 fast-carb fast-path — single-cycle OBSERVING/IDLE→CONFIRMED on a sharp, accelerating,
     // score-corroborated rise while awake & not exercising. Replay-validated (backtesting/replay.py).
     // Default ON (it's the fix for the 2026-06-16 fast-carb crash); toggle OFF = instant revert.

@@ -246,6 +246,10 @@ class BoostOverviewV2Fragment : DaggerFragment(), View.OnClickListener {
         binding.v2BtnCalibration.setOnClickListener(this)
         binding.v2BtnCgm.setOnClickListener(this)
 
+        // Meal/Alcohol confirmation buttons (Konzept 6, 2026-08-24) — Boost-prefixed keys, own row entry
+        binding.v2BtnMeal.setOnClickListener(this)
+        binding.v2BtnAlcohol.setOnClickListener(this)
+
         // Target value tap -> temp target dialog
         binding.v2TargetValue.setOnClickListener(this)
 
@@ -978,6 +982,11 @@ class BoostOverviewV2Fragment : DaggerFragment(), View.OnClickListener {
         binding.v2BtnCgm.visibility =
             (preferences.get(BooleanKey.OverviewShowCgmButton) && (xDripSource.isEnabled() || dexcomBoyda.isEnabled())).toVisibility()
 
+        // Meal/Alcohol confirmation buttons (Konzept 6, 2026-08-24) — own Boost-prefixed keys
+        // (default ON), NOT tied to the standard overview's button-visibility keys above.
+        binding.v2BtnMeal.visibility = preferences.get(BooleanKey.ApsBoostShowMealButton).toVisibility()
+        binding.v2BtnAlcohol.visibility = preferences.get(BooleanKey.ApsBoostShowAlcoholButton).toVisibility()
+
         // Show the included standard layout when accept-temp, quick-wizard, or any user action is present.
         val anyVisible = binding.v2ButtonsLayout.acceptTempButton.visibility == View.VISIBLE ||
             binding.v2ButtonsLayout.quickWizardButton.visibility == View.VISIBLE ||
@@ -1147,6 +1156,17 @@ class BoostOverviewV2Fragment : DaggerFragment(), View.OnClickListener {
                 R.id.v2_btn_cgm -> {
                     if (xDripSource.isEnabled()) openCgmApp("com.eveningoutpost.dexdrip")
                     else if (dexcomBoyda.isEnabled()) dexcomBoyda.dexcomPackages().forEach { openCgmApp(it) }
+                }
+
+                // Meal/Alcohol confirmation buttons (Konzept 6, 2026-08-24).
+                // Step 3 of the build plan: UI-only for now — visible, tappable, logs the tap, no
+                // target/dosing effect yet. Step 4 (Essen) / Step 6 (Alkohol) wire the actual
+                // shadow-first logic into these two branches.
+                R.id.v2_btn_meal -> {
+                    aapsLogger.debug(LTag.APS, "Boost MEAL button tapped (UI-only, Konzept 6 step 3 — no target change yet)")
+                }
+                R.id.v2_btn_alcohol -> {
+                    aapsLogger.debug(LTag.APS, "Boost ALC button tapped (UI-only, Konzept 6 step 3 — no SMB damping yet)")
                 }
 
                 // AID status tap -> loop dialog

@@ -1239,7 +1239,11 @@ open class OpenAPSBoostPlugin @Inject constructor(
             val nowMin = nowLocal.hour * 60 + nowLocal.minute
             val offsetMs = java.time.ZoneId.systemDefault().rules.getOffset(java.time.Instant.now()).totalSeconds * 1000L
             val leadMaxMin = preferences.getBoostDosing(DoubleKey.ApsBoostV6PreMealLeadMin).toInt()
-            val hit = MealTimeLearner.preMealWindow(mealTimeHistoryCached, nowMin, offsetMs, leadMaxMin) ?: return@run
+            // Day-type-aware (2026-08-24): Werktag/Samstag/Sonntag clustered separately, so e.g. a
+            // Sunday-only ~13:00 pattern isn't diluted by unrelated weekday events. Same (now, offsetMs)
+            // arithmetic MealTimeLearner uses internally for historical events — always consistent.
+            val nowDayType = MealTimeLearner.dayTypeOf(now, offsetMs)
+            val hit = MealTimeLearner.preMealWindow(mealTimeHistoryCached, nowMin, offsetMs, leadMaxMin, nowDayType) ?: return@run
             val exerciseNow = activityResult.activityState in setOf("ACTIVE", "VIGOROUS_AEROBIC", "MODERATE_AEROBIC", "LIGHT_AEROBIC", "RESISTANCE", "STRESS")
             val inRecovery = postExerciseRecoveryEnabled && now < recoveryWindowEnd
             if (exerciseNow || inRecovery) {
@@ -2368,6 +2372,7 @@ open class OpenAPSBoostPlugin @Inject constructor(
             requiredKey != "boost_stepcount_settings" &&
             requiredKey != "boost_hr_integration_settings" &&
             requiredKey != "boost_post_exercise_recovery_settings" &&
+            requiredKey != "boost_meal_alcohol_buttons_settings" &&
             requiredKey != "boost_night_mode_settings" &&
             requiredKey != "boost_v1_smb_sizing" &&
             requiredKey != "boost_safety_settings"
@@ -2483,6 +2488,15 @@ open class OpenAPSBoostPlugin @Inject constructor(
                     addPreference(AdaptiveDoublePreference(ctx = context, doubleKey = DoubleKey.ApsBoostPostExerciseRecoveryScale, dialogMessage = R.string.boost_post_exercise_recovery_scale_summary, title = R.string.boost_post_exercise_recovery_scale_title))
                     addPreference(AdaptiveIntPreference(ctx = context, intKey = IntKey.ApsBoostPostExerciseMinDuration, dialogMessage = R.string.boost_post_exercise_min_duration_summary, title = R.string.boost_post_exercise_min_duration_title))
                 })
+            })
+
+            // ── 4d. Meal/Alcohol Confirmation Buttons (Konzept 6, 2026-08-24) ──
+            addPreference(preferenceManager.createPreferenceScreen(context).apply {
+                key = "boost_meal_alcohol_buttons_settings"
+                title = rh.gs(R.string.boost_meal_alcohol_buttons_title)
+                summary = rh.gs(R.string.boost_meal_alcohol_buttons_summary)
+                addPreference(AdaptiveSwitchPreference(ctx = context, booleanKey = BooleanKey.ApsBoostShowMealButton, summary = R.string.boost_show_meal_button_summary, title = R.string.boost_show_meal_button_title))
+                addPreference(AdaptiveSwitchPreference(ctx = context, booleanKey = BooleanKey.ApsBoostShowAlcoholButton, summary = R.string.boost_show_alcohol_button_summary, title = R.string.boost_show_alcohol_button_title))
             })
 
             // ── 5. Night Mode ────────────────────────────────────────────

@@ -2,6 +2,8 @@ package app.aaps.plugins.aps.openAPSBoost
 
 import org.json.JSONArray
 import org.json.JSONObject
+import java.time.DayOfWeek
+import java.time.LocalDate
 import kotlin.math.abs
 import kotlin.math.min
 
@@ -28,6 +30,14 @@ import kotlin.math.min
  * Safety posture: empty / corrupt history → no modes → [preMealWindow] returns null → the feature
  * never fires. The learner has ZERO dosing impact on its own; the plugin gates the actual target
  * change behind a user toggle (shadow-first).
+ *
+ * **Day-type split (2026-08-24, User-Fund + Daten-Gegencheck):** pooling all events regardless of
+ * weekday diluted real patterns — a ~13:00 Sunday-lunch habit never reached [MIN_SESSIONS]/
+ * [MIN_DISTINCT_DAYS] because it was outnumbered by unrelated weekday events, and a mixed
+ * ~20:25-21:29 evening band conflated weekday dinners with Saturday/Sunday events that don't share
+ * a cause. [modesByDayType] clusters WEEKDAY/SATURDAY/SUNDAY separately so each can reach trust on
+ * its own. [modes] is kept unchanged (pooled, day-type-blind) for backward compatibility — existing
+ * callers/tests are unaffected unless they opt into [preMealWindow]'s new `nowDayType` parameter.
  */
 object MealTimeLearner {
 
@@ -91,6 +101,24 @@ object MealTimeLearner {
         val minutesBeforeMeal: Int,
     )
 
+    /** Werktag vs. Samstag vs. Sonntag — see class doc "Day-type split". */
+    enum class DayType { WEEKDAY, SATURDAY, SUNDAY }
+
+    /**
+     * Which [DayType] does [ms] (epoch millis, UTC) fall on in the local calendar defined by
+     * [localOffsetMs]? Uses the SAME `(ms + localOffsetMs) / dayMs` day-index arithmetic as
+     * [clusterModes]'s `distinctDays` counting, so "now" and historical events are always bucketed
+     * consistently — deliberately not `LocalDate.now()`, which could disagree at a midnight edge.
+     */
+    fun dayTypeOf(ms: Long, localOffsetMs: Long): DayType {
+        val dayIndex = (ms + localOffsetMs) / (24L * 60L * 60L * 1000L)
+        return when (LocalDate.ofEpochDay(dayIndex).dayOfWeek) {
+            DayOfWeek.SATURDAY -> DayType.SATURDAY
+            DayOfWeek.SUNDAY   -> DayType.SUNDAY
+            else               -> DayType.WEEKDAY
+        }
+    }
+
     /**
      * Record a fresh meal-commit at [tsMs]. Appends and trims to the rolling window.
      * Returns the updated history (caller persists).
@@ -110,13 +138,15 @@ object MealTimeLearner {
     }
 
     /**
-     * Greedily cluster the history's events into trusted meal modes (descending by size).
-     * O(n²) over events, but n is tiny (≤ ~3 meals/day × 60 days).
+     * Greedily cluster [events] into trusted meal modes (descending by size). O(n²) over events,
+     * but n is tiny per day-type group (≤ ~3 meals/day × ~26 matching days within the 60-day window).
+     * Shared core for [modes] (pooled) and [modesByDayType] (split) — identical algorithm, only the
+     * input event list differs.
      */
-    fun modes(h: History, localOffsetMs: Long): List<MealMode> {
-        if (h.events.size < MIN_SESSIONS) return emptyList()
+    private fun clusterModes(events: List<Long>, localOffsetMs: Long): List<MealMode> {
+        if (events.size < MIN_SESSIONS) return emptyList()
         // (minuteOfDay, dayIndex) per event
-        val pts = h.events.map { ms ->
+        val pts = events.map { ms ->
             SleepHistoryTracker.msToMinOfDay(ms, localOffsetMs) to ((ms + localOffsetMs) / (24L * 60L * 60L * 1000L))
         }.toMutableList()
 
@@ -140,6 +170,21 @@ object MealTimeLearner {
     }
 
     /**
+     * Pooled modes across ALL events, ignoring day-of-week. Kept for backward compatibility (existing
+     * tests / any other caller); [preMealWindow] no longer uses this once a [DayType] is supplied.
+     */
+    fun modes(h: History, localOffsetMs: Long): List<MealMode> = clusterModes(h.events, localOffsetMs)
+
+    /**
+     * Modes clustered separately per [DayType] — see class doc "Day-type split". A Sunday-only
+     * pattern (e.g. ~13:00 lunch) is now judged purely against other Sundays, not diluted by
+     * unrelated weekday events.
+     */
+    fun modesByDayType(h: History, localOffsetMs: Long): Map<DayType, List<MealMode>> =
+        h.events.groupBy { dayTypeOf(it, localOffsetMs) }
+            .mapValues { (_, events) -> clusterModes(events, localOffsetMs) }
+
+    /**
      * Is [nowMin] (local clock minute-of-day) inside the pre-meal lead window of any learned mode?
      *
      * The window for a mode centred at `c` is the arc `[c − openBefore, c − PRE_MEAL_LEAD_MIN_FLOOR]`
@@ -150,15 +195,21 @@ object MealTimeLearner {
      * Returns the matched mode + how far before the meal we are, or null.
      *
      * @param leadMaxMin how far ahead the window opens (the user's "lead minutes" setting).
+     * @param nowDayType when supplied, only modes clustered for THIS [DayType] (via [modesByDayType])
+     *   are considered — the day-type-aware fix. Defaults to `null` = old pooled [modes] behaviour,
+     *   so every existing caller (incl. all current tests) is unaffected unless it opts in.
      */
     fun preMealWindow(
         h: History,
         nowMin: Int,
         localOffsetMs: Long,
         leadMaxMin: Int,
+        nowDayType: DayType? = null,
     ): PreMealHit? {
         val open = leadMaxMin.coerceAtLeast(PRE_MEAL_LEAD_MIN_FLOOR + PRE_MEAL_MIN_SPAN_MIN)
-        for (mode in modes(h, localOffsetMs)) {
+        val candidateModes = if (nowDayType != null) modesByDayType(h, localOffsetMs)[nowDayType].orEmpty()
+                             else modes(h, localOffsetMs)
+        for (mode in candidateModes) {
             // minutes from now forward to the meal centre, on the circle [0..1439]
             val ahead = ((mode.centreMin - nowMin) % MINUTES_PER_DAY + MINUTES_PER_DAY) % MINUTES_PER_DAY
             if (ahead in PRE_MEAL_LEAD_MIN_FLOOR..open) {
