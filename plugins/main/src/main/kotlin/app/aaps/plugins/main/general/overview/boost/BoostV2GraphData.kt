@@ -289,14 +289,13 @@ class BoostV2GraphData @Inject constructor(
         addSeries(overviewData.varSensSeries as LineGraphSeries<ScaledDataPoint>)
     }
 
-    fun addHeartRate(useForScale: Boolean, scale: Double) {
-        val maxHR = (overviewData.heartRateGraphSeries as PointsWithLabelGraphSeries<DataPointWithLabelInterface>).highestValueY
+    fun addHeartRate(useForScale: Boolean) {
+        val hrSeries = overviewData.heartRateGraphSeries as PointsWithLabelGraphSeries<DataPointWithLabelInterface>
         if (useForScale) {
             minY = 30.0
-            maxY = maxHR
+            maxY = hrSeries.highestValueY
         }
-        addSeries(overviewData.heartRateGraphSeries as PointsWithLabelGraphSeries<DataPointWithLabelInterface>)
-        overviewData.heartRateScale.multiplier = maxY * scale / maxHR
+        addSeries(hrSeries)
     }
 
     /** Steps go on the primary axis only when [useForScale]; otherwise on the graph's own second scale, in real units. */
@@ -630,6 +629,9 @@ class BoostV2GraphData @Inject constructor(
                 graph.series.add(s)
             }
         }
+        // Nothing claimed the primary scale (e.g. a Steps-only row on the second scale, or empty data).
+        if (maxY == Double.MIN_VALUE) maxY = 1.0
+        if (minY == Double.MAX_VALUE) minY = 0.0
         var step = 1.0
         if (maxY < 1) step = 0.1
         graph.viewport.setMaxY(Round.ceilTo(maxY, step))
