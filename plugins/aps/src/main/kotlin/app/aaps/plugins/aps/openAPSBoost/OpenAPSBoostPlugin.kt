@@ -2806,6 +2806,31 @@ open class OpenAPSBoostPlugin @Inject constructor(
                     addPreference(AdaptiveDoublePreference(ctx = context, doubleKey = DoubleKey.ApsBoostPostExerciseRecoveryScale, dialogMessage = R.string.boost_post_exercise_recovery_scale_summary, title = R.string.boost_post_exercise_recovery_scale_title))
                     addPreference(AdaptiveIntPreference(ctx = context, intKey = IntKey.ApsBoostPostExerciseMinDuration, dialogMessage = R.string.boost_post_exercise_min_duration_summary, title = R.string.boost_post_exercise_min_duration_title))
                 })
+
+                // 4d. Health Connect (2026-08-26 — moved here from Night Mode: HR ingest was
+                // originally added just for overnight sleep-HR continuity, but Activity-load shadow
+                // and Konzept 8's Exercise-detection shadow piggybacked onto the same section since,
+                // and neither has anything to do with night mode. This is where it actually belongs.
+                addPreference(preferenceManager.createPreferenceScreen(context).apply {
+                    key = "boost_hc_settings"
+                    title = rh.gs(R.string.boost_hc_section_title)
+                    summary = rh.gs(R.string.boost_hc_section_summary)
+                    addPreference(AdaptiveSwitchPreference(ctx = context, booleanKey = BooleanKey.ApsBoostHealthConnectHrEnabled, summary = R.string.boost_hc_hr_summary, title = R.string.boost_hc_hr_title))
+                    addPreference(AdaptiveIntPreference(ctx = context, intKey = IntKey.ApsBoostHealthConnectPollMin, dialogMessage = R.string.boost_hc_poll_summary, title = R.string.boost_hc_poll_title))
+                    addPreference(AdaptiveSwitchPreference(ctx = context, booleanKey = BooleanKey.ApsBoostActivityShadowEnabled, summary = R.string.boost_activity_shadow_summary, title = R.string.boost_activity_shadow_title))
+                    addPreference(AdaptiveSwitchPreference(ctx = context, booleanKey = BooleanKey.ApsBoostHealthConnectExerciseEnabled, summary = R.string.boost_hc_exercise_summary, title = R.string.boost_hc_exercise_title))
+                    addPreference(androidx.preference.Preference(context).apply {
+                        key = "boost_hc_grant_permission_v1"
+                        title = context.getString(R.string.boost_hc_grant_title)
+                        summary = context.getString(R.string.boost_hc_grant_summary)
+                        setOnPreferenceClickListener {
+                            val intent = android.content.Intent(context, app.aaps.plugins.aps.openAPSBoost.HealthConnectPermissionActivity::class.java)
+                                .addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
+                            context.startActivity(intent)
+                            true
+                        }
+                    })
+                })
             })
 
             // NOTE (2026-08-24): Meal/Alcohol confirmation buttons (Konzept 6) were briefly added
@@ -2829,24 +2854,9 @@ open class OpenAPSBoostPlugin @Inject constructor(
                 addPreference(AdaptiveIntPreference(ctx = context, intKey = IntKey.ApsBoostPreSleepLeadMin, dialogMessage = R.string.boost_pre_sleep_lead_min_summary, title = R.string.boost_pre_sleep_lead_min_title))
                 addPreference(AdaptiveIntPreference(ctx = context, intKey = IntKey.ApsBoostSleepHysteresisMin, dialogMessage = R.string.boost_sleep_hysteresis_min_summary, title = R.string.boost_sleep_hysteresis_min_title))
                 addPreference(AdaptiveIntPreference(ctx = context, intKey = IntKey.ApsBoostWakeHrHysteresisMin, dialogMessage = R.string.boost_wake_hr_hysteresis_min_summary, title = R.string.boost_wake_hr_hysteresis_min_title))
-                // 2026-06-03: Health Connect HR ingest
-                addPreference(AdaptiveSwitchPreference(ctx = context, booleanKey = BooleanKey.ApsBoostHealthConnectHrEnabled, summary = R.string.boost_hc_hr_summary, title = R.string.boost_hc_hr_title))
-                addPreference(AdaptiveIntPreference(ctx = context, intKey = IntKey.ApsBoostHealthConnectPollMin, dialogMessage = R.string.boost_hc_poll_summary, title = R.string.boost_hc_poll_title))
-                // 2026-06-16: Activity-load SHADOW (HC steps → step baseline; logs would-do ISF, never doses)
-                addPreference(AdaptiveSwitchPreference(ctx = context, booleanKey = BooleanKey.ApsBoostActivityShadowEnabled, summary = R.string.boost_activity_shadow_summary, title = R.string.boost_activity_shadow_title))
-                // Konzept 8 (2026-08-26): Exercise-detection SHADOW (HC exercise sessions; logs only, never doses)
-                addPreference(AdaptiveSwitchPreference(ctx = context, booleanKey = BooleanKey.ApsBoostHealthConnectExerciseEnabled, summary = R.string.boost_hc_exercise_summary, title = R.string.boost_hc_exercise_title))
-                addPreference(androidx.preference.Preference(context).apply {
-                    key = "boost_hc_grant_permission_v1"
-                    title = context.getString(R.string.boost_hc_grant_title)
-                    summary = context.getString(R.string.boost_hc_grant_summary)
-                    setOnPreferenceClickListener {
-                        val intent = android.content.Intent(context, app.aaps.plugins.aps.openAPSBoost.HealthConnectPermissionActivity::class.java)
-                            .addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
-                        context.startActivity(intent)
-                        true
-                    }
-                })
+                // Health Connect settings (HR ingest, Activity-load shadow, Exercise-detection
+                // shadow, permission grant) moved to Exercise Settings → Health Connect (2026-08-26)
+                // — none of this is night-mode-specific, see the comment there.
             })
 
             // ── 6. Safety Settings ───────────────────────────────────────

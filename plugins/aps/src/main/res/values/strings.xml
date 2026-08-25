@@ -183,6 +183,8 @@
     <string name="boost_sleep_hysteresis_min_summary">HR + steps conditions must hold for this many minutes before SLEEPING is confirmed. Default 10.</string>
     <string name="boost_wake_hr_hysteresis_min_title">Wake confirmation window (minutes)</string>
     <string name="boost_wake_hr_hysteresis_min_summary">HR > 1.25× resting AND steps ≥ 100 must both hold for this many minutes before exiting SLEEPING. Default 5.</string>
+    <string name="boost_hc_section_title">Health Connect</string>
+    <string name="boost_hc_section_summary">Bridge heart rate, steps, and exercise sessions from Android Health Connect into Boost\'s activity detection</string>
     <string name="boost_hc_hr_title">Use Health Connect for HR</string>
     <string name="boost_hc_hr_summary">Reads heart rate from Android Health Connect on a polling cadence. Lets Garmin Connect / Wear OS HR flow into Boost continuously (including overnight) without needing the watch field to be actively pulling glucose. Requires the user to install Health Connect (on Android &lt; 14) and grant Read Heart Rate permission. Open Health Connect settings to grant.</string>
     <string name="boost_activity_shadow_title">Activity-load shadow (steps)</string>
