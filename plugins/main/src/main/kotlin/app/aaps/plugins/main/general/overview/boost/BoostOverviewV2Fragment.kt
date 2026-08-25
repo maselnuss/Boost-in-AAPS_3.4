@@ -1171,8 +1171,12 @@ class BoostOverviewV2Fragment : DaggerFragment(), View.OnClickListener {
                     aapsLogger.debug(LTag.APS, "Boost MEAL button tapped at ${dateUtil.dateAndTimeString(tapNow)} — next APS cycle will run the shadow pre-meal check")
                 }
                 R.id.v2_btn_alcohol -> {
-                    // Step 6 (Alkohol shadow logic) not built yet — stays UI-only for now.
-                    aapsLogger.debug(LTag.APS, "Boost ALC button tapped (UI-only, Konzept 6 step 3 — no SMB damping yet)")
+                    // Step 6 (2026-08-25): same principle as MEAL — only persist the tap timestamp.
+                    // OpenAPSBoostPlugin's next cycle(s) decide start-vs-escalate from this, run the
+                    // (shadow-first) damping logic, and own all session state.
+                    val tapNow = dateUtil.now()
+                    preferences.put(LongNonKey.ApsBoostLastAlcoholTapMs, tapNow)
+                    aapsLogger.debug(LTag.APS, "Boost ALC button tapped at ${dateUtil.dateAndTimeString(tapNow)} — next APS cycle will run the shadow alcohol-protection check")
                 }
 
                 // AID status tap -> loop dialog

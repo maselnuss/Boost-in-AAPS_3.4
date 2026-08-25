@@ -378,6 +378,16 @@ open class OpenAPSBoostPlugin @Inject constructor(
     @Volatile private var activeRecoveryScale: Double = 0.5
     @Volatile private var activeRecoveryTargetOffset: Double = 0.0
 
+    // Konzept 6 (2026-08-25) — Alkohol-Button state. Pure in-memory (@Volatile, not persisted),
+    // matching the SAME established pattern as recoveryWindowEnd/wasExerciseActive above — this is
+    // Shadow-only (no real dosing impact either way), so a lost session after an app restart just
+    // means "stop logging for a while", not a safety concern; not worth the extra persistence
+    // complexity the Meal-tap dedup needed (that one guarded real, cumulative learner data).
+    @Volatile private var alcoholProtectionStartMs: Long = 0L         // 0 = no active session
+    @Volatile private var alcoholIntensity: AlcoholShadow.Intensity = AlcoholShadow.Intensity.LIGHT
+    @Volatile private var alcoholWaveCrossingsAtLastEscalation: Int = 0
+    @Volatile private var alcoholLastSeenTapMs: Long = 0L             // last ALC tap timestamp already reacted to
+
     // ---- Lifecycle ----
 
     override fun specialEnableCondition(): Boolean {
@@ -1335,6 +1345,70 @@ open class OpenAPSBoostPlugin @Inject constructor(
             }
         }
 
+        // 7c. Alkohol-Button (Konzept 6, 2026-08-25) — shadow SMB-damping. See AlcoholShadow.kt for
+        // the full parameter reasoning (wave/hyper-brake thresholds, damping levels, adaptive
+        // duration). Pure state-machine bookkeeping lives here; all decision RULES are the isolated,
+        // unit-tested AlcoholShadow object — this block only feeds it real inputs and logs.
+        var alcoholShadowActive = false
+        var alcoholShadowMultiplier = 1.0
+        run {
+            val lastAlcoholTapMs = preferences.get(LongNonKey.ApsBoostLastAlcoholTapMs)
+            val isNewTap = lastAlcoholTapMs > 0 && lastAlcoholTapMs > alcoholLastSeenTapMs
+            val wasActive = alcoholProtectionStartMs > 0L
+
+            if (isNewTap) {
+                if (!wasActive) {
+                    // First tap of a new session.
+                    alcoholProtectionStartMs = lastAlcoholTapMs
+                    alcoholIntensity = AlcoholShadow.Intensity.LIGHT
+                    alcoholWaveCrossingsAtLastEscalation = 0
+                    aapsLogger.debug(LTag.APS, "Alcohol protection: started @ ${dateUtil.dateAndTimeString(lastAlcoholTapMs)}, intensity=LIGHT")
+                }
+                // else: a repeat tap while already active — handled as an escalation signal below,
+                // does NOT restart the session (start time / elapsed duration stay as-is).
+                alcoholLastSeenTapMs = lastAlcoholTapMs
+            }
+
+            if (alcoholProtectionStartMs == 0L) return@run   // no active session this cycle
+
+            val elapsedMin = (now - alcoholProtectionStartMs) / 60_000L
+
+            // Wave count over the WHOLE session so far (not just this cycle) — matches "mehrere
+            // Wellen" being about the session as a whole, not a single-cycle snapshot.
+            val bgSinceStart = persistenceLayer.getBgReadingsDataFromTimeToTime(alcoholProtectionStartMs, now, true).map { it.value }
+            val waveCrossings = AlcoholShadow.countUpwardCrossings(bgSinceStart)
+            // NEW crossings since the last escalation (not the raw session-wide total) — without this
+            // distinction, a wave count that stays at/above the threshold would re-trigger
+            // `shouldEscalate` every single cycle (~every 5 min) and rush straight to HIGH almost
+            // immediately after the 2nd wave. Passed directly as `waveCrossings` below (no sentinel
+            // encoding) so the comparison inside shouldEscalate() is exactly what it looks like.
+            val newWaveCrossingsSinceLastEscalation = waveCrossings - alcoholWaveCrossingsAtLastEscalation
+            val repeatTapNow = isNewTap && wasActive
+
+            if (alcoholIntensity != AlcoholShadow.Intensity.HIGH &&
+                AlcoholShadow.shouldEscalate(waveCrossings = newWaveCrossingsSinceLastEscalation, repeatTapDuringProtection = repeatTapNow)
+            ) {
+                val old = alcoholIntensity
+                alcoholIntensity = alcoholIntensity.escalated()
+                alcoholWaveCrossingsAtLastEscalation = waveCrossings
+                aapsLogger.debug(LTag.APS, "Alcohol protection: escalated $old -> $alcoholIntensity (waves=$waveCrossings, repeatTap=$repeatTapNow)")
+            }
+
+            val stabilityWindowStartMs = now - AlcoholShadow.STABILITY_LOOKBACK_MIN * 60_000L
+            val bgLastStabilityWindow = persistenceLayer.getBgReadingsDataFromTimeToTime(stabilityWindowStartMs, now, true).map { it.value }
+            val bgStable = AlcoholShadow.isBgStable(bgLastStabilityWindow)
+            val currentIob = iobArray.getOrNull(0)?.iob ?: 999.0   // fail closed: unknown IOB never counts as "low"
+
+            if (AlcoholShadow.protectionShouldEnd(elapsedMin, bgStable, currentIob)) {
+                aapsLogger.debug(LTag.APS, "Alcohol protection: ended after ${elapsedMin}min (bgStable=$bgStable, iob=$currentIob)")
+                alcoholProtectionStartMs = 0L
+                return@run
+            }
+
+            alcoholShadowMultiplier = AlcoholShadow.effectiveSmbMultiplier(alcoholIntensity, glucoseStatus.glucose)
+            alcoholShadowActive = true
+        }
+
         // ---- Build the OapsProfileBoost ----
 
         val oapsProfile = OapsProfileBoost(
@@ -1524,6 +1598,40 @@ open class OpenAPSBoostPlugin @Inject constructor(
                 aapsLogger.debug(LTag.APS, "V6 pre-meal dose-comparison (SHADOW, target=${shadowTargetBg.toInt()}): would SMB=${shadowRt.units ?: 0.0}U rate=${shadowRt.rate ?: 0.0}U/h insulinReq=${shadowRt.insulinReq ?: 0.0}U — compare against the real 'Result:' line logged immediately below (same cycle)")
             }.onFailure { e ->
                 aapsLogger.error(LTag.APS, "V6 pre-meal dose-comparison shadow call failed (non-fatal, real dosing below unaffected)", e)
+            }
+        }
+
+        // Alcohol dose-comparison shadow (Konzept 6, 2026-08-25) — same safety pattern as the Essen
+        // shadow directly above: independent determine_basal() call, riskModel = null, runs BEFORE
+        // the real call below. Unlike Essen, the REAL (unmodified) profile is used here — the
+        // alcohol button doesn't change the target, only how much of the computed SMB would be
+        // delivered — so this shadow call's own `units` is the reference value the damping
+        // multiplier gets applied to afterward, logged as "would be suppressed".
+        if (alcoholShadowActive) {
+            runCatching {
+                determineBasalBoost.determine_basal(
+                    glucose_status = glucoseStatus,
+                    currenttemp = currentTemp,
+                    iob_data_array = iobArray,
+                    profile = oapsProfile,
+                    autosens_data = autosensResult,
+                    meal_data = mealData,
+                    microBolusAllowed = microBolusAllowed,
+                    currentTime = now,
+                    flatBGsDetected = flatBGsDetected,
+                    riskModel = null,
+                    mealModel = boostMealModel,
+                    recentSmbVolume60Min = recentSmbVolume60Min,
+                    cumulativeSmbCap60Min = cumulativeSmbCap60Min,
+                    recentLowBG45Min = recentLowBG45Min,
+                    timeSinceLastSmbMin = timeSinceLastSmbMin
+                )
+            }.onSuccess { referenceRt ->
+                val referenceUnits = referenceRt.units ?: 0.0
+                val suppressedUnits = referenceUnits * (1.0 - alcoholShadowMultiplier)
+                aapsLogger.debug(LTag.APS, "Alcohol dose-comparison (SHADOW, intensity=$alcoholIntensity, multiplier=$alcoholShadowMultiplier): reference SMB=${referenceUnits}U → would suppress ${suppressedUnits}U — compare against the real 'Result:' line logged immediately below (same cycle)")
+            }.onFailure { e ->
+                aapsLogger.error(LTag.APS, "Alcohol dose-comparison shadow call failed (non-fatal, real dosing below unaffected)", e)
             }
         }
 

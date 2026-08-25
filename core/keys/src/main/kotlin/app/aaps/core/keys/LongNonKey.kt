@@ -16,10 +16,10 @@ enum class LongNonKey(
     // Health Connect HR ingest — high-water mark for incremental polling (epoch ms)
     ApsBoostHealthConnectLastSyncMs("boost_health_connect_last_sync_ms", 0L),
 
-    // Konzept 6 (2026-08-24) — timestamp of the last manual MEAL button tap (epoch ms). Written
-    // by BoostOverviewV2Fragment on tap, read by OpenAPSBoostPlugin's next cycle(s). NOT a Settings
-    // toggle — internal bridge between the UI tap and the loop's calculation cycle. (ALC gets its
-    // own equivalent key when its shadow logic is built — step 6, not yet.)
+    // Konzept 6 (2026-08-24/25) — timestamp of the last manual MEAL/ALC button tap (epoch ms).
+    // Written by BoostOverviewV2Fragment on tap, read by OpenAPSBoostPlugin's next cycle(s). NOT a
+    // Settings toggle — internal bridge between the UI tap and the loop's calculation cycle.
     ApsBoostLastMealTapMs("boost_last_meal_tap_ms", 0L),
+    ApsBoostLastAlcoholTapMs("boost_last_alcohol_tap_ms", 0L),
 }
 
