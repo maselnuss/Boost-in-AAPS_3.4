@@ -1034,6 +1034,7 @@
                 android:padding="14dp">
 
                 <ImageView
+                    android:id="@+id/v2_btn_meal_icon"
                     android:layout_width="20dp"
                     android:layout_height="20dp"
                     app:srcCompat="@drawable/ic_food"

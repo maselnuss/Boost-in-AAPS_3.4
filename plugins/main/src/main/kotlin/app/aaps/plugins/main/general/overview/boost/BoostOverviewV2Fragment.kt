@@ -1295,8 +1295,22 @@ class BoostOverviewV2Fragment : DaggerFragment(), View.OnClickListener {
                     // Plugin for here: the Fragment already knows the tap landed, right now, so it
                     // says so immediately. View.postDelayed (not the background `handler`) posts back
                     // on the UI thread automatically — safe to touch the label directly in it.
+                    // Same amber (#ffb300) as ALC's active state, for the same "something happened"
+                    // visual language — but here it's a one-off flash, not an ongoing status color.
+                    val mealFlashColor = Color.parseColor("#ffb300")
                     binding.v2BtnMealLabel.text = "LOGGED"
-                    binding.v2BtnMealLabel.postDelayed({ binding.v2BtnMealLabel.text = "MEAL" }, 2000L)
+                    binding.v2BtnMeal.setCardBackgroundColor(Color.parseColor("#33ffb300"))
+                    binding.v2BtnMeal.strokeColor = Color.parseColor("#4dffb300")
+                    binding.v2BtnMealIcon.setColorFilter(mealFlashColor)
+                    binding.v2BtnMealLabel.setTextColor(mealFlashColor)
+                    binding.v2BtnMealLabel.postDelayed({
+                        binding.v2BtnMealLabel.text = "MEAL"
+                        val mealNormalColor = Color.parseColor("#00d4ff")
+                        binding.v2BtnMeal.setCardBackgroundColor(Color.parseColor("#1a00d4ff"))
+                        binding.v2BtnMeal.strokeColor = Color.parseColor("#2600d4ff")
+                        binding.v2BtnMealIcon.setColorFilter(mealNormalColor)
+                        binding.v2BtnMealLabel.setTextColor(mealNormalColor)
+                    }, 2000L)
                 }
                 R.id.v2_btn_alcohol -> {
                     // Step 6 (2026-08-25): same principle as MEAL — only persist the tap timestamp.
