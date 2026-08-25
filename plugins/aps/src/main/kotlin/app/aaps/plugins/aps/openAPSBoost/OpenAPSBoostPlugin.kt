@@ -143,7 +143,10 @@ open class OpenAPSBoostPlugin @Inject constructor(
     // Activity-load SHADOW (2026-06-16) — HC steps → single-source daily totals for the step baseline.
     private val healthConnectStepsIngest: HealthConnectStepsIngest,
     // Konzept 8 exercise-detection SHADOW (2026-08-26) — HC ExerciseSessionRecord, log-only.
-    private val healthConnectExerciseIngest: HealthConnectExerciseIngest
+    private val healthConnectExerciseIngest: HealthConnectExerciseIngest,
+    // Konzept 9 sleep-detection SHADOW (2026-08-26) — HC SleepSessionRecord/RestingHeartRateRecord,
+    // logged as a second opinion next to SleepStateDetector, log-only.
+    private val healthConnectSleepIngest: HealthConnectSleepIngest
 ) : PluginBase(
     PluginDescription()
         .mainType(PluginType.APS)
@@ -1031,6 +1034,8 @@ open class OpenAPSBoostPlugin @Inject constructor(
         healthConnectStepsIngest.syncIfDue()
         // Konzept 8 (2026-08-26): Health Connect EXERCISE ingest (exercise-detection shadow). Throttled internally.
         healthConnectExerciseIngest.syncIfDue()
+        // Konzept 9 (2026-08-26): Health Connect SLEEP ingest (sleep-detection shadow). Throttled internally.
+        healthConnectSleepIngest.syncIfDue()
         lastAPSResult = null
         val glucoseStatus = glucoseStatusCalculatorSMB.glucoseStatusData
         val profile = profileFunction.getProfile()
@@ -2237,6 +2242,34 @@ open class OpenAPSBoostPlugin @Inject constructor(
                     if (historyChanged) {
                         preferences.put(StringKey.ApsBoostSleepHistory, sleepHistoryCached.serialize())
                     }
+
+                    // Konzept 9 (2026-08-26) — Sleep-detection SHADOW comparison. Second opinion
+                    // only: Health Connect's own SleepSessionRecord/RestingHeartRateRecord vs
+                    // SleepStateDetector's entirely HR+step-derived verdict — neither overrides the
+                    // other, this never changes dosing/targets/night-mode on its own (open design
+                    // question from Claude_boost_extension_ideas.md 7.6.2 resolved this way: log
+                    // both, no automatic winner). Fired on the same sleep/wake transitions as the
+                    // history tracking above, not every cycle — lines the comparison up with an
+                    // actual state change instead of being 5-min-cycle noise.
+                    val hcSession = healthConnectSleepIngest.recentSleepSessions.firstOrNull { s -> now in s.startMs..s.endMs }
+                    val detectorAsleepNow = sleepResult.newState.state == SleepStateDetector.SleepState.SLEEPING
+                    val hcAgrees = detectorAsleepNow == (hcSession != null)
+                    val hcRestingHr = healthConnectSleepIngest.latestRestingHrBpm
+                    val restingHrNote = if (hcRestingHr != null) {
+                        val diff = hcRestingHr - effectiveHrResting
+                        "restingHR: Boost=${effectiveHrResting} vs HC=${hcRestingHr} (diff ${if (diff >= 0) "+" else ""}${diff}bpm)"
+                    } else {
+                        "restingHR: no HC RestingHeartRateRecord in window"
+                    }
+                    aapsLogger.debug(
+                        LTag.APS,
+                        "Sleep shadow (Konzept 9): detector→${sleepResult.newState.state} " +
+                            "(${sleepResult.wakeReason ?: sleepResult.newState.sleepEntryReason ?: "n/a"}); " +
+                            "HC session active now: ${
+                                if (hcSession != null) "YES (source=${hcSession.source}, ${dateUtil.dateAndTimeString(hcSession.startMs)} -> ${dateUtil.dateAndTimeString(hcSession.endMs)})"
+                                else "NO"
+                            }; agree=$hcAgrees; $restingHrNote — logged only, no effect on night-mode/dosing"
+                    )
                 }
 
                 // ── NS upload: HR + sleep + learned-schedule telemetry ─────────
@@ -2820,6 +2853,7 @@ open class OpenAPSBoostPlugin @Inject constructor(
                     addPreference(AdaptiveIntPreference(ctx = context, intKey = IntKey.ApsBoostHealthConnectPollMin, dialogMessage = R.string.boost_hc_poll_summary, title = R.string.boost_hc_poll_title))
                     addPreference(AdaptiveSwitchPreference(ctx = context, booleanKey = BooleanKey.ApsBoostActivityShadowEnabled, summary = R.string.boost_activity_shadow_summary, title = R.string.boost_activity_shadow_title))
                     addPreference(AdaptiveSwitchPreference(ctx = context, booleanKey = BooleanKey.ApsBoostHealthConnectExerciseEnabled, summary = R.string.boost_hc_exercise_summary, title = R.string.boost_hc_exercise_title))
+                    addPreference(AdaptiveSwitchPreference(ctx = context, booleanKey = BooleanKey.ApsBoostHealthConnectSleepEnabled, summary = R.string.boost_hc_sleep_summary, title = R.string.boost_hc_sleep_title))
                     addPreference(androidx.preference.Preference(context).apply {
                         key = "boost_hc_grant_permission_v1"
                         title = context.getString(R.string.boost_hc_grant_title)

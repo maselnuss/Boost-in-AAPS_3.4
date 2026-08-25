@@ -17,23 +17,27 @@ import android.widget.TextView
  * Android versions (see plugins/aps/src/main/AndroidManifest.xml).
  *
  * The Activity itself just renders a plain-text explanation of why AAPS reads
- * heart rate. No outbound network call, no analytics, no data leaves the device.
+ * this data. No outbound network call, no analytics, no data leaves the device.
+ *
+ * Text updated 2026-08-26 (Konzept 9) to also cover Exercise (Konzept 8, was
+ * missing from this screen since it launched) and the new Sleep/Resting-HR
+ * permissions — this screen should describe everything actually requested.
  */
 class HealthConnectPrivacyActivity : Activity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
-        title = "AndroidAPS — Heart rate use"
+        title = "AndroidAPS — Health Connect access"
 
         val padding = (resources.displayMetrics.density * 20).toInt()
         val text = TextView(this).apply {
             setPadding(padding, padding, padding, padding)
             textSize = 16f
             text = """
-                Why AndroidAPS reads heart rate
+                Why AndroidAPS reads this data
 
-                AndroidAPS uses heart rate data to:
+                AndroidAPS uses Health Connect data to:
 
                 • Detect when you are asleep, so it can engage Night Mode and
                   suppress unsafe SMBs overnight without relying purely on a
@@ -47,9 +51,14 @@ class HealthConnectPrivacyActivity : Activity() {
                   for more accurate sleep-state detection and Karvonen heart
                   rate reserve calculations for exercise classification.
 
+                • Compare the watch's own sleep-session and resting-heart-rate
+                  readings against AndroidAPS's own heart-rate-derived sleep
+                  detection, purely as a logged second opinion — this never
+                  changes dosing or targets on its own.
+
                 What happens to the data
 
-                • Heart rate samples stay on this device.
+                • Health Connect samples stay on this device.
                 • Nothing is uploaded anywhere by this part of AndroidAPS,
                   beyond what you already share via your existing Nightscout
                   configuration (if any).
