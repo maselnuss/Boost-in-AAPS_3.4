@@ -21,5 +21,15 @@ enum class LongNonKey(
     // Settings toggle — internal bridge between the UI tap and the loop's calculation cycle.
     ApsBoostLastMealTapMs("boost_last_meal_tap_ms", 0L),
     ApsBoostLastAlcoholTapMs("boost_last_alcohol_tap_ms", 0L),
+
+    // Konzept 6 (2026-08-25) — Fragment -> Plugin: long-press on ALC requests an immediate manual
+    // end of the active alcohol-protection session (epoch ms of the long-press). Same
+    // write-timestamp/read-and-act bridge pattern as the tap keys above.
+    ApsBoostAlcoholCancelRequestMs("boost_alcohol_cancel_request_ms", 0L),
+
+    // Konzept 6 (2026-08-25) — Plugin -> Fragment: mirrors the Plugin's own alcoholProtectionStartMs
+    // (0 = no active session) purely so the Overview button can display elapsed time. Display-only —
+    // the Fragment never writes this, and the Plugin's own decision logic never reads it back.
+    ApsBoostAlcoholProtectionStartMs("boost_alcohol_protection_start_ms", 0L),
 }
 

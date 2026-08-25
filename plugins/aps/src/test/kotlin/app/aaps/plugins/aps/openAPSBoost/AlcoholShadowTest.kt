@@ -48,22 +48,16 @@ class AlcoholShadowTest {
         assertThat(AlcoholShadow.countUpwardCrossings(listOf(90.0, 95.0), threshold = 100.0)).isEqualTo(0)
     }
 
-    // ─── shouldEscalate ────────────────────────────────────────────────────────
+    // ─── shouldEscalate (2026-08-25: waves-only, repeat-tap escalation removed) ──
 
-    @Test fun `escalates on enough waves alone, no tap needed`() {
-        assertThat(AlcoholShadow.shouldEscalate(waveCrossings = 2, repeatTapDuringProtection = false)).isTrue()
+    @Test fun `escalates once enough waves are seen`() {
+        assertThat(AlcoholShadow.shouldEscalate(waveCrossings = 2)).isTrue()
+        assertThat(AlcoholShadow.shouldEscalate(waveCrossings = 3)).isTrue()
     }
 
-    @Test fun `escalates on a repeat tap alone, even with zero waves`() {
-        assertThat(AlcoholShadow.shouldEscalate(waveCrossings = 0, repeatTapDuringProtection = true)).isTrue()
-    }
-
-    @Test fun `does not escalate with neither signal`() {
-        assertThat(AlcoholShadow.shouldEscalate(waveCrossings = 1, repeatTapDuringProtection = false)).isFalse()
-    }
-
-    @Test fun `both signals together still just escalates (no double-step)`() {
-        assertThat(AlcoholShadow.shouldEscalate(waveCrossings = 2, repeatTapDuringProtection = true)).isTrue()
+    @Test fun `does not escalate below the wave threshold`() {
+        assertThat(AlcoholShadow.shouldEscalate(waveCrossings = 0)).isFalse()
+        assertThat(AlcoholShadow.shouldEscalate(waveCrossings = 1)).isFalse()
     }
 
     // ─── effectiveSmbMultiplier / hyper brake ─────────────────────────────────

@@ -61,6 +61,7 @@ import app.aaps.core.keys.IntKey
 import app.aaps.core.keys.IntentKey
 import app.aaps.core.keys.LongNonKey
 import app.aaps.core.keys.StringKey
+import app.aaps.core.keys.StringNonKey
 import app.aaps.core.keys.UnitDoubleKey
 import app.aaps.core.keys.interfaces.Preferences
 import app.aaps.plugins.aps.getBoostDosing
@@ -387,6 +388,7 @@ open class OpenAPSBoostPlugin @Inject constructor(
     @Volatile private var alcoholIntensity: AlcoholShadow.Intensity = AlcoholShadow.Intensity.LIGHT
     @Volatile private var alcoholWaveCrossingsAtLastEscalation: Int = 0
     @Volatile private var alcoholLastSeenTapMs: Long = 0L             // last ALC tap timestamp already reacted to
+    @Volatile private var alcoholLastSeenCancelMs: Long = 0L          // last long-press cancel request already reacted to
 
     // ---- Lifecycle ----
 
@@ -1363,13 +1365,30 @@ open class OpenAPSBoostPlugin @Inject constructor(
                     alcoholIntensity = AlcoholShadow.Intensity.LIGHT
                     alcoholWaveCrossingsAtLastEscalation = 0
                     aapsLogger.debug(LTag.APS, "Alcohol protection: started @ ${dateUtil.dateAndTimeString(lastAlcoholTapMs)}, intensity=LIGHT")
+                } else {
+                    // Repeat tap while already active (2026-08-25, simplified after user question):
+                    // deliberately NO effect on escalation/duration — a tap doesn't confirm anything
+                    // BG-relevant actually happened, waves do. Logged only so a tap is never silently
+                    // swallowed without any acknowledgement.
+                    aapsLogger.debug(LTag.APS, "Alcohol protection: repeat tap while already active — no additional effect, waves alone drive escalation")
                 }
-                // else: a repeat tap while already active — handled as an escalation signal below,
-                // does NOT restart the session (start time / elapsed duration stay as-is).
                 alcoholLastSeenTapMs = lastAlcoholTapMs
             }
 
             if (alcoholProtectionStartMs == 0L) return@run   // no active session this cycle
+
+            // Manual cancel (2026-08-25, long-press on ALC while active). Only honored if the
+            // request is newer than one already processed AND at/after the CURRENT session's start
+            // — a stale cancel timestamp from a previous, already-ended session must not reach
+            // forward and kill a brand-new one that happens to start later.
+            val cancelRequestMs = preferences.get(LongNonKey.ApsBoostAlcoholCancelRequestMs)
+            if (cancelRequestMs > alcoholLastSeenCancelMs && cancelRequestMs >= alcoholProtectionStartMs) {
+                alcoholLastSeenCancelMs = cancelRequestMs
+                aapsLogger.debug(LTag.APS, "Alcohol protection: manually cancelled by user @ ${dateUtil.dateAndTimeString(cancelRequestMs)} (was active since ${dateUtil.dateAndTimeString(alcoholProtectionStartMs)})")
+                alcoholProtectionStartMs = 0L
+                preferences.put(LongNonKey.ApsBoostAlcoholProtectionStartMs, 0L)
+                return@run
+            }
 
             val elapsedMin = (now - alcoholProtectionStartMs) / 60_000L
 
@@ -1383,15 +1402,14 @@ open class OpenAPSBoostPlugin @Inject constructor(
             // immediately after the 2nd wave. Passed directly as `waveCrossings` below (no sentinel
             // encoding) so the comparison inside shouldEscalate() is exactly what it looks like.
             val newWaveCrossingsSinceLastEscalation = waveCrossings - alcoholWaveCrossingsAtLastEscalation
-            val repeatTapNow = isNewTap && wasActive
 
             if (alcoholIntensity != AlcoholShadow.Intensity.HIGH &&
-                AlcoholShadow.shouldEscalate(waveCrossings = newWaveCrossingsSinceLastEscalation, repeatTapDuringProtection = repeatTapNow)
+                AlcoholShadow.shouldEscalate(waveCrossings = newWaveCrossingsSinceLastEscalation)
             ) {
                 val old = alcoholIntensity
                 alcoholIntensity = alcoholIntensity.escalated()
                 alcoholWaveCrossingsAtLastEscalation = waveCrossings
-                aapsLogger.debug(LTag.APS, "Alcohol protection: escalated $old -> $alcoholIntensity (waves=$waveCrossings, repeatTap=$repeatTapNow)")
+                aapsLogger.debug(LTag.APS, "Alcohol protection: escalated $old -> $alcoholIntensity (waves=$waveCrossings)")
             }
 
             val stabilityWindowStartMs = now - AlcoholShadow.STABILITY_LOOKBACK_MIN * 60_000L
@@ -1402,8 +1420,14 @@ open class OpenAPSBoostPlugin @Inject constructor(
             if (AlcoholShadow.protectionShouldEnd(elapsedMin, bgStable, currentIob)) {
                 aapsLogger.debug(LTag.APS, "Alcohol protection: ended after ${elapsedMin}min (bgStable=$bgStable, iob=$currentIob)")
                 alcoholProtectionStartMs = 0L
+                preferences.put(LongNonKey.ApsBoostAlcoholProtectionStartMs, 0L)
                 return@run
             }
+
+            // Display-only mirror for the Overview button's timer/intensity text (2026-08-25) — never
+            // read back by this Plugin's own decision logic, purely an output for the Fragment.
+            preferences.put(LongNonKey.ApsBoostAlcoholProtectionStartMs, alcoholProtectionStartMs)
+            preferences.put(StringNonKey.ApsBoostAlcoholIntensityDisplay, alcoholIntensity.name)
 
             alcoholShadowMultiplier = AlcoholShadow.effectiveSmbMultiplier(alcoholIntensity, glucoseStatus.glucose)
             alcoholShadowActive = true

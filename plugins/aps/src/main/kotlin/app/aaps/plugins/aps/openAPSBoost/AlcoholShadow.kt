@@ -80,10 +80,15 @@ object AlcoholShadow {
         return crossings
     }
 
-    /** Escalate one step if enough waves were seen this protection window, or the user tapped again
-     * while protection was already active. Either signal alone is sufficient. */
-    fun shouldEscalate(waveCrossings: Int, repeatTapDuringProtection: Boolean): Boolean =
-        waveCrossings >= WAVE_COUNT_FOR_ESCALATION || repeatTapDuringProtection
+    /** Escalate one step once enough real BG waves were seen this protection window. Deliberately
+     * NOT also triggered by a repeat tap (2026-08-25, removed after user question — earlier design
+     * had "tap again = escalate too"): a tap doesn't confirm anything BG-relevant actually happened
+     * (e.g. a straight spirit with no mixer produces no wave at all), so it could escalate — reduce
+     * insulin — on a signal unconnected to real risk, and an uncertain "did that register?" re-tap
+     * could do it by accident. Waves measure the actual thing that matters. The one real documented
+     * incident (6-8 Biere + Malibu) had THREE real waves — wave-detection alone already covers it. */
+    fun shouldEscalate(waveCrossings: Int): Boolean =
+        waveCrossings >= WAVE_COUNT_FOR_ESCALATION
 
     /** The SMB multiplier actually in effect THIS cycle — the hyper-brake overrides intensity-based
      * damping entirely (not partially, back to 1.0 = no damping) once BG reaches the threshold. */

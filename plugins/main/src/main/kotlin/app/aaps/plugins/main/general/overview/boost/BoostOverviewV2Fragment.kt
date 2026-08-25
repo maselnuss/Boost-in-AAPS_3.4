@@ -70,6 +70,7 @@ import app.aaps.core.keys.BooleanKey
 import app.aaps.core.keys.IntKey
 import app.aaps.core.keys.IntNonKey
 import app.aaps.core.keys.LongNonKey
+import app.aaps.core.keys.StringNonKey
 import app.aaps.core.keys.UnitDoubleKey
 import app.aaps.core.keys.interfaces.Preferences
 import app.aaps.core.objects.extensions.round
@@ -250,6 +251,16 @@ class BoostOverviewV2Fragment : DaggerFragment(), View.OnClickListener {
         // Meal/Alcohol confirmation buttons (Konzept 6, 2026-08-24) — Boost-prefixed keys, own row entry
         binding.v2BtnMeal.setOnClickListener(this)
         binding.v2BtnAlcohol.setOnClickListener(this)
+        // Long-press ALC (2026-08-25) = manual cancel of an active protection session. Deliberately
+        // a different gesture from the normal tap (which starts a session / is a no-op if already
+        // active) — harder to trigger by accident than a second tap, see AlcoholShadow.kt doc for
+        // why a plain repeat tap was rejected as an escalation *or* cancel signal.
+        binding.v2BtnAlcohol.setOnLongClickListener {
+            val cancelNow = dateUtil.now()
+            preferences.put(LongNonKey.ApsBoostAlcoholCancelRequestMs, cancelNow)
+            aapsLogger.debug(LTag.APS, "Boost ALC button long-pressed at ${dateUtil.dateAndTimeString(cancelNow)} — requests cancelling an active protection session, no-op if none is active")
+            true
+        }
 
         // Target value tap -> temp target dialog
         binding.v2TargetValue.setOnClickListener(this)
@@ -987,6 +998,28 @@ class BoostOverviewV2Fragment : DaggerFragment(), View.OnClickListener {
         // (default ON), NOT tied to the standard overview's button-visibility keys above.
         binding.v2BtnMeal.visibility = preferences.get(BooleanKey.ApsBoostShowMealButton).toVisibility()
         binding.v2BtnAlcohol.visibility = preferences.get(BooleanKey.ApsBoostShowAlcoholButton).toVisibility()
+
+        // Alcohol protection timer/intensity (2026-08-25) — read-only display of what the Plugin's
+        // own state machine already decided; this Fragment only formats it, never acts on it.
+        val alcoholStartMs = preferences.get(LongNonKey.ApsBoostAlcoholProtectionStartMs)
+        val alcoholActive = alcoholStartMs > 0
+        binding.v2BtnAlcoholLabel.text = if (alcoholActive) {
+            val elapsedMin = (dateUtil.now() - alcoholStartMs) / 60_000L
+            val timeStr = if (elapsedMin >= 60) "${elapsedMin / 60}h${elapsedMin % 60}m" else "${elapsedMin}m"
+            val intensity = preferences.get(StringNonKey.ApsBoostAlcoholIntensityDisplay)
+            if (intensity.isNotEmpty()) "ALC $timeStr $intensity" else "ALC $timeStr"
+        } else {
+            "ALC"
+        }
+
+        // Active session = same amber (#ffb300) already used for hasTempTarget/isModified/AID-dot
+        // elsewhere in this fragment (see updateHeroRight()) — reused here, not a new convention.
+        // Inactive = the button's normal cyan (#00d4ff) look, unchanged from its default XML values.
+        val alcoholCardColor = if (alcoholActive) Color.parseColor("#ffb300") else Color.parseColor("#00d4ff")
+        binding.v2BtnAlcohol.setCardBackgroundColor(Color.parseColor(if (alcoholActive) "#33ffb300" else "#1a00d4ff"))
+        binding.v2BtnAlcohol.strokeColor = Color.parseColor(if (alcoholActive) "#4dffb300" else "#2600d4ff")
+        binding.v2BtnAlcoholIcon.setColorFilter(alcoholCardColor)
+        binding.v2BtnAlcoholLabel.setTextColor(alcoholCardColor)
 
         // Show the included standard layout when accept-temp, quick-wizard, or any user action is present.
         val anyVisible = binding.v2ButtonsLayout.acceptTempButton.visibility == View.VISIBLE ||

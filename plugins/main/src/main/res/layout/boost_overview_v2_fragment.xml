@@ -1104,6 +1104,7 @@
                         android:padding="14dp">
 
                         <ImageView
+                            android:id="@+id/v2_btn_alcohol_icon"
                             android:layout_width="20dp"
                             android:layout_height="20dp"
                             app:srcCompat="@drawable/ic_alcohol"
@@ -1111,6 +1112,7 @@
                             android:importantForAccessibility="no" />
 
                         <TextView
+                            android:id="@+id/v2_btn_alcohol_label"
                             android:layout_width="wrap_content"
                             android:layout_height="wrap_content"
                             android:text="ALC"
