@@ -85,6 +85,7 @@ import app.aaps.plugins.main.R
 import app.aaps.plugins.main.databinding.BoostOverviewV2FragmentBinding
 import app.aaps.plugins.main.general.overview.notifications.NotificationStore
 import app.aaps.plugins.main.general.overview.notifications.events.EventUpdateOverviewNotification
+import com.jjoe64.graphview.GridLabelRenderer
 import dagger.android.support.DaggerFragment
 import io.reactivex.rxjava3.disposables.CompositeDisposable
 import io.reactivex.rxjava3.kotlin.plusAssign
@@ -252,6 +253,15 @@ class BoostOverviewV2Fragment : DaggerFragment(), View.OnClickListener {
             val cancelNow = dateUtil.now()
             preferences.put(LongNonKey.ApsBoostAlcoholCancelRequestMs, cancelNow)
             aapsLogger.debug(LTag.APS, "Boost ALC button long-pressed at ${dateUtil.dateAndTimeString(cancelNow)} — requests cancelling an active protection session, no-op if none is active")
+            // Without this, the cancel only takes effect on the NEXT scheduled APS cycle (up to
+            // 5 minutes away) while the button keeps showing the old running state — looks like the
+            // long-press did nothing. Force an immediate cycle so the Plugin's cancel-check (which
+            // runs early in its Alcohol block) picks it up right away, then re-check the UI shortly
+            // after — real cycles measured ~150-350ms in testing, so 1.5s is a safe margin. If the
+            // forced cycle is somehow slower, this is a no-op and the normal 60s ticker still catches
+            // up — never worse than before, just no longer worst-case 5 minutes.
+            handler.post { loop.invoke("BoostAlcoholCancel", allowNotification = false) }
+            handler.postDelayed({ refreshAll() }, 1500L)
             true
         }
 
@@ -977,6 +987,13 @@ class BoostOverviewV2Fragment : DaggerFragment(), View.OnClickListener {
             graph.gridLabelRenderer?.isHorizontalLabelsVisible = false
             graph.gridLabelRenderer?.labelVerticalWidth = axisWidth
             graph.gridLabelRenderer?.numVerticalLabels = 3
+            // NONE (2026-08-25/26, user request + screenshot comparison against a real device):
+            // default is BOTH, drawing a full horizontal+vertical grid on every secondary graph.
+            // Matching the clean look of the reference screenshot (curves + axis labels only, no
+            // grid lines at all — what looks like a "zero line" there is the IOB series' own filled
+            // area meeting y=0, not a rendered grid line). The primary BG graph keeps its own
+            // default untouched — this only affects these small secondary graphs.
+            graph.gridLabelRenderer?.gridStyle = GridLabelRenderer.GridStyle.NONE
             relativeLayout.addView(graph)
 
             val label = TextView(ctx)

@@ -995,94 +995,106 @@
                             tools:ignore="HardcodedText" />
                     </LinearLayout>
                 </com.google.android.material.card.MaterialCardView>
-
-                <!-- MEAL button (pref: boost_show_meal_button) — Konzept 6, 2026-08-24 -->
-                <com.google.android.material.card.MaterialCardView
-                    android:id="@+id/v2_btn_meal"
-                    android:layout_width="0dp"
-                    android:layout_height="wrap_content"
-                    android:layout_weight="1"
-                    android:layout_marginStart="6dp"
-                    android:visibility="gone"
-                    app:cardBackgroundColor="#1a00d4ff"
-                    app:cardCornerRadius="12dp"
-                    app:cardElevation="0dp"
-                    app:strokeColor="#2600d4ff"
-                    app:strokeWidth="1dp"
-                    android:foreground="?attr/selectableItemBackground">
-
-                    <LinearLayout
-                        android:layout_width="match_parent"
-                        android:layout_height="wrap_content"
-                        android:orientation="horizontal"
-                        android:gravity="center"
-                        android:padding="14dp">
-
-                        <ImageView
-                            android:layout_width="20dp"
-                            android:layout_height="20dp"
-                            app:srcCompat="@drawable/ic_food"
-                            app:tint="#00d4ff"
-                            android:importantForAccessibility="no" />
-
-                        <TextView
-                            android:layout_width="wrap_content"
-                            android:layout_height="wrap_content"
-                            android:text="MEAL"
-                            android:textSize="13sp"
-                            android:textStyle="bold"
-                            android:textColor="#00d4ff"
-                            android:layout_marginStart="8dp"
-                            tools:ignore="HardcodedText" />
-                    </LinearLayout>
-                </com.google.android.material.card.MaterialCardView>
-
-                <!-- ALC button (pref: boost_show_alcohol_button) — Konzept 6, 2026-08-24 -->
-                <com.google.android.material.card.MaterialCardView
-                    android:id="@+id/v2_btn_alcohol"
-                    android:layout_width="0dp"
-                    android:layout_height="wrap_content"
-                    android:layout_weight="1"
-                    android:layout_marginStart="6dp"
-                    android:visibility="gone"
-                    app:cardBackgroundColor="#1a00d4ff"
-                    app:cardCornerRadius="12dp"
-                    app:cardElevation="0dp"
-                    app:strokeColor="#2600d4ff"
-                    app:strokeWidth="1dp"
-                    android:foreground="?attr/selectableItemBackground">
-
-                    <LinearLayout
-                        android:layout_width="match_parent"
-                        android:layout_height="wrap_content"
-                        android:orientation="horizontal"
-                        android:gravity="center"
-                        android:padding="14dp">
-
-                        <ImageView
-                            android:id="@+id/v2_btn_alcohol_icon"
-                            android:layout_width="20dp"
-                            android:layout_height="20dp"
-                            app:srcCompat="@drawable/ic_alcohol"
-                            app:tint="#00d4ff"
-                            android:importantForAccessibility="no" />
-
-                        <TextView
-                            android:id="@+id/v2_btn_alcohol_label"
-                            android:layout_width="wrap_content"
-                            android:layout_height="wrap_content"
-                            android:text="ALC"
-                            android:textSize="13sp"
-                            android:textStyle="bold"
-                            android:textColor="#00d4ff"
-                            android:layout_marginStart="8dp"
-                            tools:ignore="HardcodedText" />
-                    </LinearLayout>
-                </com.google.android.material.card.MaterialCardView>
             </LinearLayout>
 
         </LinearLayout>
     </androidx.core.widget.NestedScrollView>
+
+    <!-- ═══ MEAL/ALC — fixed below the scroll area, always visible without scrolling (2026-08-25,
+         user request) ═══ -->
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="horizontal"
+        android:paddingStart="12dp"
+        android:paddingEnd="12dp"
+        android:layout_marginTop="8dp"
+        android:layout_marginBottom="8dp"
+        android:baselineAligned="false">
+
+        <!-- MEAL button (pref: boost_show_meal_button) — Konzept 6, 2026-08-24 -->
+        <com.google.android.material.card.MaterialCardView
+            android:id="@+id/v2_btn_meal"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:visibility="gone"
+            app:cardBackgroundColor="#1a00d4ff"
+            app:cardCornerRadius="12dp"
+            app:cardElevation="0dp"
+            app:strokeColor="#2600d4ff"
+            app:strokeWidth="1dp"
+            android:foreground="?attr/selectableItemBackground">
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="horizontal"
+                android:gravity="center"
+                android:padding="14dp">
+
+                <ImageView
+                    android:layout_width="20dp"
+                    android:layout_height="20dp"
+                    app:srcCompat="@drawable/ic_food"
+                    app:tint="#00d4ff"
+                    android:importantForAccessibility="no" />
+
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="MEAL"
+                    android:textSize="13sp"
+                    android:textStyle="bold"
+                    android:textColor="#00d4ff"
+                    android:layout_marginStart="8dp"
+                    tools:ignore="HardcodedText" />
+            </LinearLayout>
+        </com.google.android.material.card.MaterialCardView>
+
+        <!-- ALC button (pref: boost_show_alcohol_button) — Konzept 6, 2026-08-24 -->
+        <com.google.android.material.card.MaterialCardView
+            android:id="@+id/v2_btn_alcohol"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:layout_marginStart="6dp"
+            android:visibility="gone"
+            app:cardBackgroundColor="#1a00d4ff"
+            app:cardCornerRadius="12dp"
+            app:cardElevation="0dp"
+            app:strokeColor="#2600d4ff"
+            app:strokeWidth="1dp"
+            android:foreground="?attr/selectableItemBackground">
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="horizontal"
+                android:gravity="center"
+                android:padding="14dp">
+
+                <ImageView
+                    android:id="@+id/v2_btn_alcohol_icon"
+                    android:layout_width="20dp"
+                    android:layout_height="20dp"
+                    app:srcCompat="@drawable/ic_alcohol"
+                    app:tint="#00d4ff"
+                    android:importantForAccessibility="no" />
+
+                <TextView
+                    android:id="@+id/v2_btn_alcohol_label"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="ALC"
+                    android:textSize="13sp"
+                    android:textStyle="bold"
+                    android:textColor="#00d4ff"
+                    android:layout_marginStart="8dp"
+                    tools:ignore="HardcodedText" />
+            </LinearLayout>
+        </com.google.android.material.card.MaterialCardView>
+    </LinearLayout>
 
     <!-- ═══ Pump status bar ═══ -->
     <LinearLayout
