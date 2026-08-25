@@ -1138,6 +1138,12 @@ open class OpenAPSBoostPlugin @Inject constructor(
                     activeRecoveryTargetOffset = targetOffsetMgdl
                     recoveryWindowEnd = now + recoveryMillis
                     aapsLogger.debug(LTag.APS, "Boost post-exercise [$lastExerciseStateAtTransition]: window=${recoveryMillis / 60_000}min target=${recoveryTargetMgdl.toInt()}mg/dL SMBscale=$activeRecoveryScale")
+                    // Duration-scaled window SHADOW comparison (2026-08-26, not applied) — see
+                    // PostExerciseRecoveryShadow.kt. recoveryMillis/recoveryWindowEnd above (fixed
+                    // formula, ignores how long the exercise actually lasted) are what ACTUALLY gets
+                    // applied; this only logs what a duration-aware version would have given instead.
+                    val shadowWindowMin = PostExerciseRecoveryShadow.durationScaledWindowMin(exerciseDurationMin, (recoveryMillis / 60_000L).toInt())
+                    aapsLogger.debug(LTag.APS, "Boost post-exercise SHADOW proposal: duration-scaled window would be ${shadowWindowMin}min (actual exercise duration ${exerciseDurationMin}min) vs ${recoveryMillis / 60_000}min actually applied above — not applied, comparison only")
                     if (persistenceLayer.getTemporaryTargetActiveAt(now) == null) {
                         val tt = TT(
                             timestamp = now,
@@ -1444,6 +1450,17 @@ open class OpenAPSBoostPlugin @Inject constructor(
 
             alcoholShadowMultiplier = AlcoholShadow.effectiveSmbMultiplier(alcoholIntensity, glucoseStatus.glucose)
             alcoholShadowActive = true
+        }
+
+        // Post-exercise recovery hyper-brake SHADOW comparison (2026-08-26, not applied) — see
+        // PostExerciseRecoveryShadow.kt. activeRecoveryScale above is what ACTUALLY gets applied to
+        // boost_bolus/boost_scale below; this only logs what the BG-aware version would have done
+        // differently this cycle, for evaluation.
+        if (postExerciseRecoveryEnabled && now < recoveryWindowEnd) {
+            val shadowScale = PostExerciseRecoveryShadow.effectiveScale(activeRecoveryScale, glucoseStatus.glucose)
+            if (shadowScale != activeRecoveryScale) {
+                aapsLogger.debug(LTag.APS, "Boost post-exercise SHADOW proposal: hyper-brake would suppress dampening this cycle (BG=${glucoseStatus.glucose} >= ${PostExerciseRecoveryShadow.HYPER_BRAKE_MGDL}) — scale $activeRecoveryScale -> $shadowScale, vs $activeRecoveryScale actually applied below — not applied, comparison only")
+            }
         }
 
         // ---- Build the OapsProfileBoost ----
