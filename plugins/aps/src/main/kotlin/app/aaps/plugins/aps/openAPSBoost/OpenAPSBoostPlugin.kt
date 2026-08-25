@@ -1625,40 +1625,6 @@ open class OpenAPSBoostPlugin @Inject constructor(
             }
         }
 
-        // Alcohol dose-comparison shadow (Konzept 6, 2026-08-25) — same safety pattern as the Essen
-        // shadow directly above: independent determine_basal() call, riskModel = null, runs BEFORE
-        // the real call below. Unlike Essen, the REAL (unmodified) profile is used here — the
-        // alcohol button doesn't change the target, only how much of the computed SMB would be
-        // delivered — so this shadow call's own `units` is the reference value the damping
-        // multiplier gets applied to afterward, logged as "would be suppressed".
-        if (alcoholShadowActive) {
-            runCatching {
-                determineBasalBoost.determine_basal(
-                    glucose_status = glucoseStatus,
-                    currenttemp = currentTemp,
-                    iob_data_array = iobArray,
-                    profile = oapsProfile,
-                    autosens_data = autosensResult,
-                    meal_data = mealData,
-                    microBolusAllowed = microBolusAllowed,
-                    currentTime = now,
-                    flatBGsDetected = flatBGsDetected,
-                    riskModel = null,
-                    mealModel = boostMealModel,
-                    recentSmbVolume60Min = recentSmbVolume60Min,
-                    cumulativeSmbCap60Min = cumulativeSmbCap60Min,
-                    recentLowBG45Min = recentLowBG45Min,
-                    timeSinceLastSmbMin = timeSinceLastSmbMin
-                )
-            }.onSuccess { referenceRt ->
-                val referenceUnits = referenceRt.units ?: 0.0
-                val suppressedUnits = referenceUnits * (1.0 - alcoholShadowMultiplier)
-                aapsLogger.debug(LTag.APS, "Alcohol dose-comparison (SHADOW, intensity=$alcoholIntensity, multiplier=$alcoholShadowMultiplier): reference SMB=${referenceUnits}U → would suppress ${suppressedUnits}U — compare against the real 'Result:' line logged immediately below (same cycle)")
-            }.onFailure { e ->
-                aapsLogger.error(LTag.APS, "Alcohol dose-comparison shadow call failed (non-fatal, real dosing below unaffected)", e)
-            }
-        }
-
         determineBasalBoost.determine_basal(
             glucose_status = glucoseStatus,
             currenttemp = currentTemp,
@@ -2397,6 +2363,22 @@ open class OpenAPSBoostPlugin @Inject constructor(
             it.boostAutosens_appliedRatio = Round.roundTo(autosensResult.ratio, 0.001)
             if (!useTdd) {
                 it.reason.append("autosensCoord[${it.boostAutosens_mode}]: oref=${Round.roundTo(orefAutosensRatio, 0.01)} curve=${Round.roundTo(isfResult.ratio, 0.01)} applied=${Round.roundTo(autosensResult.ratio, 0.01)}; ")
+            }
+
+            // Alcohol dose-comparison (Konzept 6, 2026-08-25/26) — reads it.units HERE, after every
+            // override above (V6-ACTIVE, cumulative-cap suppression, etc.) has already run, so this
+            // is bit-identical to what the 'Result:' line below reports as actually delivered. A
+            // separate shadow determine_basal() call was used originally (matching the Essen-shadow
+            // pattern) but was WRONG for Alcohol specifically: unlike Essen, Alcohol never changes
+            // determine_basal()'s input, only scales its output, so the shadow call just duplicated
+            // the real computation MINUS the V6-ACTIVE post-processing — live-tested 2026-08-25 and
+            // caught diverging from the real delivered dose (shadow said 1.2U, Result: said 0.8U,
+            // because V6-ACTIVE reduced it afterward). Reading it.units here instead removes that
+            // whole extra computation and can never diverge from the real dose again.
+            if (alcoholShadowActive) {
+                val actualUnits = it.units ?: 0.0
+                val suppressedUnits = actualUnits * (1.0 - alcoholShadowMultiplier)
+                aapsLogger.debug(LTag.APS, "Alcohol dose-comparison (SHADOW, intensity=$alcoholIntensity, multiplier=$alcoholShadowMultiplier): actual final SMB=${actualUnits}U → would suppress ${suppressedUnits}U — see the real 'Result:' line immediately below (same cycle, same value)")
             }
 
             val determineBasalResult = apsResultProvider.get().with(it)
