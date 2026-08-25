@@ -2691,6 +2691,7 @@ open class OpenAPSBoostPlugin @Inject constructor(
             requiredKey != "boost_stepcount_settings" &&
             requiredKey != "boost_hr_integration_settings" &&
             requiredKey != "boost_post_exercise_recovery_settings" &&
+            requiredKey != "boost_hc_settings" &&
             requiredKey != "boost_night_mode_settings" &&
             requiredKey != "boost_v1_smb_sizing" &&
             requiredKey != "boost_safety_settings"
