@@ -1306,9 +1306,22 @@ open class OpenAPSBoostPlugin @Inject constructor(
             // tap as a fresh duplicate event on the first cycle after restart.
             val lastMealTapMs = preferences.get(LongNonKey.ApsBoostLastMealTapMs)
             if (lastMealTapMs > 0 && lastMealTapMs !in mealTimeHistoryCached.events) {
-                mealTimeHistoryCached = MealTimeLearner.record(mealTimeHistoryCached, lastMealTapMs)
-                preferences.put(StringKey.ApsBoostMealTimeHistory, mealTimeHistoryCached.serialize())
-                aapsLogger.debug(LTag.APS, "V6 meal-time learner: recorded MANUAL tap @ ${dateUtil.dateAndTimeString(lastMealTapMs)} (${mealTimeHistoryCached.events.size} events)")
+                // Accidental-repeat-tap guard (2026-08-26, user question): the exact-timestamp dedup
+                // above only stops the SAME tap being re-recorded on a later cycle — it does nothing
+                // for a genuinely new (different ms) tap seconds/minutes after the last one, e.g. a
+                // fat-finger double-tap. Each such tap would otherwise train the learner as its own
+                // distinct meal event. Proximity check against the whole history, not just the last
+                // entry, since events aren't guaranteed sorted.
+                val tooSoonAfterLastRecordedEvent = mealTimeHistoryCached.events.any {
+                    kotlin.math.abs(it - lastMealTapMs) < MealTimeLearner.MIN_TAP_GAP_MIN * 60_000L
+                }
+                if (tooSoonAfterLastRecordedEvent) {
+                    aapsLogger.debug(LTag.APS, "V6 meal-time learner: ignored tap @ ${dateUtil.dateAndTimeString(lastMealTapMs)} — within ${MealTimeLearner.MIN_TAP_GAP_MIN}min of an already-recorded event (treated as accidental repeat, not a new meal)")
+                } else {
+                    mealTimeHistoryCached = MealTimeLearner.record(mealTimeHistoryCached, lastMealTapMs)
+                    preferences.put(StringKey.ApsBoostMealTimeHistory, mealTimeHistoryCached.serialize())
+                    aapsLogger.debug(LTag.APS, "V6 meal-time learner: recorded MANUAL tap @ ${dateUtil.dateAndTimeString(lastMealTapMs)} (${mealTimeHistoryCached.events.size} events)")
+                }
             }
             val tapAgeMin = manualTapAgeMin(now, lastMealTapMs)
             val isManualTapActive = manualTapActive(now, lastMealTapMs)

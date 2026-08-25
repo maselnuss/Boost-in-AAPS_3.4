@@ -1284,6 +1284,19 @@ class BoostOverviewV2Fragment : DaggerFragment(), View.OnClickListener {
                     val tapNow = dateUtil.now()
                     preferences.put(LongNonKey.ApsBoostLastMealTapMs, tapNow)
                     aapsLogger.debug(LTag.APS, "Boost MEAL button tapped at ${dateUtil.dateAndTimeString(tapNow)} — next APS cycle will run the shadow pre-meal check")
+                    // Force an immediate cycle instead of waiting up to 5 minutes for the next
+                    // scheduled one — same reasoning/pattern as the ALC long-press cancel below.
+                    // Without this the button looks unresponsive: nothing on screen changes until
+                    // the next scheduled runEngine() picks up the tap.
+                    handler.post { loop.invoke("BoostMealTap", allowNotification = false) }
+                    handler.postDelayed({ refreshAll() }, 1500L)
+                    // Instant local "got it" flash (2026-08-26) — MEAL has no ongoing session state
+                    // to display (unlike ALC's timer/intensity), so there's nothing to wait on the
+                    // Plugin for here: the Fragment already knows the tap landed, right now, so it
+                    // says so immediately. View.postDelayed (not the background `handler`) posts back
+                    // on the UI thread automatically — safe to touch the label directly in it.
+                    binding.v2BtnMealLabel.text = "LOGGED"
+                    binding.v2BtnMealLabel.postDelayed({ binding.v2BtnMealLabel.text = "MEAL" }, 2000L)
                 }
                 R.id.v2_btn_alcohol -> {
                     // Step 6 (2026-08-25): same principle as MEAL — only persist the tap timestamp.
@@ -1292,6 +1305,8 @@ class BoostOverviewV2Fragment : DaggerFragment(), View.OnClickListener {
                     val tapNow = dateUtil.now()
                     preferences.put(LongNonKey.ApsBoostLastAlcoholTapMs, tapNow)
                     aapsLogger.debug(LTag.APS, "Boost ALC button tapped at ${dateUtil.dateAndTimeString(tapNow)} — next APS cycle will run the shadow alcohol-protection check")
+                    handler.post { loop.invoke("BoostAlcoholTap", allowNotification = false) }
+                    handler.postDelayed({ refreshAll() }, 1500L)
                 }
 
                 // AID status tap -> loop dialog

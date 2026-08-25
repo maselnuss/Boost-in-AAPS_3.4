@@ -59,6 +59,12 @@ object MealTimeLearner {
     /** Guaranteed minimum window span (min), so a low leadMax setting can't yield a zero-width window. */
     const val PRE_MEAL_MIN_SPAN_MIN = 10
 
+    /** A manual MEAL tap within this many minutes of an already-recorded event is treated as an
+     *  accidental repeat (fat-finger / "did that register?" double-tap), not a second real meal —
+     *  see caller in OpenAPSBoostPlugin.kt. Real, distinct meals/snacks are realistically never this
+     *  close together; without this, each repeat tap would train the learner as its own event. */
+    const val MIN_TAP_GAP_MIN = 15
+
     private const val MINUTES_PER_DAY = 1440
 
     /** Rolling history of meal-commit timestamps (UTC ms). */

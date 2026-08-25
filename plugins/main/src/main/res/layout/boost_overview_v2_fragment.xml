@@ -1041,6 +1041,7 @@
                     android:importantForAccessibility="no" />
 
                 <TextView
+                    android:id="@+id/v2_btn_meal_label"
                     android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
                     android:text="MEAL"
