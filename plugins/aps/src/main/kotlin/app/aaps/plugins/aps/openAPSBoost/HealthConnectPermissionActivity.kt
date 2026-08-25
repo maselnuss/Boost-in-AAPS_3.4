@@ -7,6 +7,7 @@ import androidx.activity.result.ActivityResultLauncher
 import androidx.health.connect.client.HealthConnectClient
 import androidx.health.connect.client.PermissionController
 import androidx.health.connect.client.permission.HealthPermission
+import androidx.health.connect.client.records.ExerciseSessionRecord
 import androidx.health.connect.client.records.HeartRateRecord
 import androidx.health.connect.client.records.StepsRecord
 
@@ -31,7 +32,8 @@ class HealthConnectPermissionActivity : ComponentActivity() {
     private lateinit var requestLauncher: ActivityResultLauncher<Set<String>>
     private val requiredPermissions = setOf(
         HealthPermission.getReadPermission(HeartRateRecord::class),
-        HealthPermission.getReadPermission(StepsRecord::class)   // Boost activity-load shadow (2026-06-16)
+        HealthPermission.getReadPermission(StepsRecord::class),           // Boost activity-load shadow (2026-06-16)
+        HealthPermission.getReadPermission(ExerciseSessionRecord::class)  // Konzept 8 exercise-detection shadow (2026-08-26)
     )
 
     override fun onCreate(savedInstanceState: Bundle?) {

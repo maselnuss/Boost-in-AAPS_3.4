@@ -141,7 +141,9 @@ open class OpenAPSBoostPlugin @Inject constructor(
     // Health Connect into AAPS's local HR table. Pulled each Boost cycle (throttled internally).
     private val healthConnectHrIngest: HealthConnectHrIngest,
     // Activity-load SHADOW (2026-06-16) — HC steps → single-source daily totals for the step baseline.
-    private val healthConnectStepsIngest: HealthConnectStepsIngest
+    private val healthConnectStepsIngest: HealthConnectStepsIngest,
+    // Konzept 8 exercise-detection SHADOW (2026-08-26) — HC ExerciseSessionRecord, log-only.
+    private val healthConnectExerciseIngest: HealthConnectExerciseIngest
 ) : PluginBase(
     PluginDescription()
         .mainType(PluginType.APS)
@@ -389,6 +391,14 @@ open class OpenAPSBoostPlugin @Inject constructor(
     @Volatile private var alcoholWaveCrossingsAtLastEscalation: Int = 0
     @Volatile private var alcoholLastSeenTapMs: Long = 0L             // last ALC tap timestamp already reacted to
     @Volatile private var alcoholLastSeenCancelMs: Long = 0L          // last long-press cancel request already reacted to
+
+    // Konzept 8 (2026-08-26) — dedup so the same detected exercise session isn't re-logged every
+    // cycle while still "relevant" (see ExerciseShadow.isCurrentlyRelevant). Keyed by session endMs;
+    // a Set (not one Long) because more than one still-relevant session can coexist (e.g. badminton
+    // and a bike ride both within the last 90min). Not restart-safe by design: at most one harmless
+    // duplicate log line per session after a process restart, never a correctness issue since this
+    // only gates a log line, nothing dosing-relevant. Pruned each cycle to the relevant window.
+    private val loggedExerciseSessionEndMs = java.util.concurrent.ConcurrentHashMap.newKeySet<Long>()
 
     // ---- Lifecycle ----
 
@@ -1019,6 +1029,8 @@ open class OpenAPSBoostPlugin @Inject constructor(
         healthConnectHrIngest.syncIfDue()
         // 2026-06-16: Health Connect STEPS ingest (activity-load shadow). Throttled internally.
         healthConnectStepsIngest.syncIfDue()
+        // Konzept 8 (2026-08-26): Health Connect EXERCISE ingest (exercise-detection shadow). Throttled internally.
+        healthConnectExerciseIngest.syncIfDue()
         lastAPSResult = null
         val glucoseStatus = glucoseStatusCalculatorSMB.glucoseStatusData
         val profile = profileFunction.getProfile()
@@ -1105,6 +1117,55 @@ open class OpenAPSBoostPlugin @Inject constructor(
         val activityResult = calculateBoostActivity(now, isTempTarget, targetBg, minBg, maxBg, profilePercent)
         // Publish the step-based sleep-in state for next cycle's night-mode evaluation. (2026-07-02)
         sleepInActiveCached = activityResult.sleepInActive
+
+        // 1a. Exercise-detection shadow (Konzept 8, 2026-08-26) — Health Connect ExerciseSessionRecord,
+        // any type, log-only, never touches activityResult/TT/dosing. Real incident this targets:
+        // cycling not caught by the HR+steps detector above, real hypo, had to drink against it. For
+        // types ExerciseShadow.severityTier() maps to an existing post-exercise-recovery tier, also
+        // computes what that ALREADY-LIVE mechanism (see 1b below) WOULD have set — using the
+        // DURATION-AWARE + hyper-brake-aware proposal (PostExerciseRecoveryShadow.kt) rather than the
+        // live mechanism's own fixed-window formula, since Konzept 8 hasn't gone live at all yet —
+        // no reason to build it on the flawed formula from day one. Never actually applied here,
+        // purely a hypothetical for evaluation.
+        for (session in healthConnectExerciseIngest.recentSessions) {
+            if (!ExerciseShadow.isCurrentlyRelevant(session, now)) continue
+            if (!loggedExerciseSessionEndMs.add(session.endMs)) continue   // already logged this session
+            val minutesAgo = (now - session.endMs) / 60_000L
+            val sessionDurationMin = (session.endMs - session.startMs) / 60_000L
+            val hrCaughtItToo = activityResult.activityState in setOf("RESISTANCE", "MODERATE_AEROBIC", "VIGOROUS_AEROBIC", "LIGHT_AEROBIC", "ACTIVE")
+            val tier = ExerciseShadow.severityTier(session.exerciseType)
+            val consequenceNote = if (tier == null) {
+                "type not mapped to a severity tier — detection only, no hypothetical consequence computed"
+            } else {
+                // Exact same multiplier table as the real post-exercise recovery mechanism below
+                // (1b) — MODERATE_AEROBIC has no dedicated row there either, so it (like anything
+                // else unrecognised) falls to the same else/default the real code uses.
+                val (windowMultiplier, targetOffsetMgdl, scaleMultiplier) = when (tier) {
+                    "VIGOROUS_AEROBIC" -> Triple(1.25, 0.0, 0.8)
+                    "RESISTANCE" -> Triple(1.5, 10.0, 1.2)
+                    else -> Triple(1.0, 0.0, 1.0)
+                }
+                val fixedWindowMin = (postExerciseRecoveryHours * 60.0 * windowMultiplier).toInt()
+                val hypotheticalWindowMin = PostExerciseRecoveryShadow.durationScaledWindowMin(sessionDurationMin, fixedWindowMin)
+                val hypotheticalTarget = postExerciseRecoveryTarget + targetOffsetMgdl
+                val hypotheticalScale = PostExerciseRecoveryShadow.effectiveScale(
+                    (postExerciseRecoveryScale * scaleMultiplier).coerceIn(0.1, 1.0),
+                    glucoseStatus.glucose
+                )
+                "tier=$tier, session duration=${sessionDurationMin}min -> would set post-exercise recovery: " +
+                    "window=${hypotheticalWindowMin}min (fixed-formula would be ${fixedWindowMin}min) " +
+                    "target=${hypotheticalTarget.toInt()}mg/dL SMBscale=$hypotheticalScale " +
+                    "(current BG=${glucoseStatus.glucose}, hyper-brake ${if (PostExerciseRecoveryShadow.hyperBrakeActive(glucoseStatus.glucose)) "ACTIVE" else "inactive"})"
+            }
+            aapsLogger.debug(
+                LTag.APS,
+                "Exercise detected (SHADOW, source=${session.source}, exerciseType=${session.exerciseType}): " +
+                    "session ${dateUtil.dateAndTimeString(session.startMs)} -> ${dateUtil.dateAndTimeString(session.endMs)}, " +
+                    "ended ${minutesAgo}min ago; existing HR+steps detector this cycle: activityState=${activityResult.activityState} " +
+                    "(${if (hrCaughtItToo) "also caught it" else "MISSED"}); $consequenceNote — logged only, no effect on TT/dosing"
+            )
+        }
+        loggedExerciseSessionEndMs.removeIf { now - it > ExerciseShadow.RELEVANT_AFTER_END_MIN * 60_000L }
 
         // 1b. Post-exercise recovery transition detection
         // HR-aware: all exercise states (aerobic, resistance) trigger recovery, not just "ACTIVE".
@@ -2773,6 +2834,8 @@ open class OpenAPSBoostPlugin @Inject constructor(
                 addPreference(AdaptiveIntPreference(ctx = context, intKey = IntKey.ApsBoostHealthConnectPollMin, dialogMessage = R.string.boost_hc_poll_summary, title = R.string.boost_hc_poll_title))
                 // 2026-06-16: Activity-load SHADOW (HC steps → step baseline; logs would-do ISF, never doses)
                 addPreference(AdaptiveSwitchPreference(ctx = context, booleanKey = BooleanKey.ApsBoostActivityShadowEnabled, summary = R.string.boost_activity_shadow_summary, title = R.string.boost_activity_shadow_title))
+                // Konzept 8 (2026-08-26): Exercise-detection SHADOW (HC exercise sessions; logs only, never doses)
+                addPreference(AdaptiveSwitchPreference(ctx = context, booleanKey = BooleanKey.ApsBoostHealthConnectExerciseEnabled, summary = R.string.boost_hc_exercise_summary, title = R.string.boost_hc_exercise_title))
                 addPreference(androidx.preference.Preference(context).apply {
                     key = "boost_hc_grant_permission_v1"
                     title = context.getString(R.string.boost_hc_grant_title)

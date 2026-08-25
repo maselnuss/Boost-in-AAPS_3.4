@@ -34,6 +34,8 @@
     <uses-permission android:name="android.permission.health.READ_HEART_RATE" />
     <!-- Boost activity-load shadow (2026-06-16): single-source daily step volume from Health Connect. -->
     <uses-permission android:name="android.permission.health.READ_STEPS" />
+    <!-- Konzept 8 (2026-08-26): watch-native training sessions (any type) from Health Connect, SHADOW ONLY. -->
+    <uses-permission android:name="android.permission.health.READ_EXERCISE" />
 
     <!-- Required intent query for Health Connect <SDK 34 installations -->
     <queries>

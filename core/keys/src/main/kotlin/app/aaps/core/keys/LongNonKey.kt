@@ -16,6 +16,9 @@ enum class LongNonKey(
     // Health Connect HR ingest — high-water mark for incremental polling (epoch ms)
     ApsBoostHealthConnectLastSyncMs("boost_health_connect_last_sync_ms", 0L),
 
+    // Konzept 8 (2026-08-26) — Health Connect Exercise Session ingest, diagnostics only (mirrors HR's)
+    ApsBoostHealthConnectLastExerciseSyncMs("boost_health_connect_last_exercise_sync_ms", 0L),
+
     // Konzept 6 (2026-08-24/25) — timestamp of the last manual MEAL/ALC button tap (epoch ms).
     // Written by BoostOverviewV2Fragment on tap, read by OpenAPSBoostPlugin's next cycle(s). NOT a
     // Settings toggle — internal bridge between the UI tap and the loop's calculation cycle.
