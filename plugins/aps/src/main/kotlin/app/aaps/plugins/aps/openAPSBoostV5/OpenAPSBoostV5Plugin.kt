@@ -677,7 +677,8 @@ open class OpenAPSBoostV5Plugin @Inject constructor(
         "openapsboostv5_settings", "boost_advanced_settings", "absorption_smb_advanced",
         "boost_default_aaps_settings", "boost_dynisf_settings", "boost_exercise_settings",
         "boost_stepcount_settings", "boost_hr_integration_settings",
-        "boost_post_exercise_recovery_settings", "boost_night_mode_settings", "boost_safety_settings",
+        "boost_post_exercise_recovery_settings", "boost_meal_alcohol_buttons_settings",
+        "boost_night_mode_settings", "boost_safety_settings",
     )
 
     override fun addPreferenceScreen(
@@ -724,9 +725,16 @@ open class OpenAPSBoostV5Plugin @Inject constructor(
             addPreference(AdaptiveDoublePreference(ctx = context, doubleKey = DoubleKey.ApsBoostV6PreMealTargetMgdl, dialogMessage = R.string.boost_v6_pre_meal_target_mgdl_summary, title = R.string.boost_v6_pre_meal_target_mgdl_title))
             addPreference(AdaptiveDoublePreference(ctx = context, doubleKey = DoubleKey.ApsBoostV6PreMealLeadMin, dialogMessage = R.string.boost_v6_pre_meal_lead_min_summary, title = R.string.boost_v6_pre_meal_lead_min_title))
             // Meal/Alcohol confirmation buttons (Konzept 6, 2026-08-24) — placed directly next to the
-            // V6 pre-meal settings they're the manual trigger for, not buried under Exercise Settings.
-            addPreference(AdaptiveSwitchPreference(ctx = context, booleanKey = BooleanKey.ApsBoostShowMealButton, summary = R.string.boost_show_meal_button_summary, title = R.string.boost_show_meal_button_title))
-            addPreference(AdaptiveSwitchPreference(ctx = context, booleanKey = BooleanKey.ApsBoostShowAlcoholButton, summary = R.string.boost_show_alcohol_button_summary, title = R.string.boost_show_alcohol_button_title))
+            // V6 pre-meal settings they're the manual trigger for (not buried under Exercise
+            // Settings), grouped into their own sub-screen (not bare switches) so the two long
+            // descriptions don't bloat the Advanced list — best of both: right place, tidy list.
+            addPreference(preferenceManager.createPreferenceScreen(context).apply {
+                key = "boost_meal_alcohol_buttons_settings"
+                title = rh.gs(R.string.boost_meal_alcohol_buttons_title)
+                summary = rh.gs(R.string.boost_meal_alcohol_buttons_summary)
+                addPreference(AdaptiveSwitchPreference(ctx = context, booleanKey = BooleanKey.ApsBoostShowMealButton, summary = R.string.boost_show_meal_button_summary, title = R.string.boost_show_meal_button_title))
+                addPreference(AdaptiveSwitchPreference(ctx = context, booleanKey = BooleanKey.ApsBoostShowAlcoholButton, summary = R.string.boost_show_alcohol_button_summary, title = R.string.boost_show_alcohol_button_title))
+            })
         }
         // Shared engine settings nested under Advanced. includeEngineEssentials = false: the
         // 6 essentials above are NOT repeated inside the engine sub-screens (no duplicate keys).

@@ -1266,6 +1266,15 @@ open class OpenAPSBoostPlugin @Inject constructor(
         var v6MaxBg = activityResult.maxBg
         var v6TargetBg = activityResult.targetBg
         var v6PreMealReason: String? = null
+        // Konzept 6 dose-comparison (2026-08-25): the hypothetical lower-only target IF pre-meal
+        // fired, computed regardless of the ApsBoostV6PreMealTarget toggle. Deliberately kept in
+        // SEPARATE variables from v6MinBg/v6MaxBg/v6TargetBg above — those still drive the real
+        // oapsProfile exactly as before; these are read ONLY by the shadow determine_basal() call
+        // further down, so the existing toggle-gated shadow/live behaviour is entirely unaffected.
+        var shadowPreMealTargetActive = false
+        var shadowMinBg = v6MinBg
+        var shadowMaxBg = v6MaxBg
+        var shadowTargetBg = v6TargetBg
         run {
             val nowLocal = java.time.LocalTime.now()
             val nowMin = nowLocal.hour * 60 + nowLocal.minute
@@ -1304,11 +1313,19 @@ open class OpenAPSBoostPlugin @Inject constructor(
                 return@run
             }
             val preMealTarget = preferences.getBoostDosing(DoubleKey.ApsBoostV6PreMealTargetMgdl)
+            // Lower-only clamp, computed ONCE and shared by both the real (toggle-gated) branch
+            // below and the always-on shadow dose-comparison — avoids the two ever silently diverging.
+            if (preMealTarget < v6TargetBg) {
+                shadowMinBg = minOf(v6MinBg, preMealTarget)
+                shadowMaxBg = minOf(v6MaxBg, preMealTarget)
+                shadowTargetBg = preMealTarget
+                shadowPreMealTargetActive = true
+            }
             v6PreMealReason = if (preferences.getBoostDosing(BooleanKey.ApsBoostV6PreMealTarget)) {
                 if (preMealTarget < v6TargetBg) {   // lower-only
-                    v6MinBg = minOf(v6MinBg, preMealTarget)
-                    v6MaxBg = minOf(v6MaxBg, preMealTarget)
-                    v6TargetBg = preMealTarget
+                    v6MinBg = shadowMinBg
+                    v6MaxBg = shadowMaxBg
+                    v6TargetBg = shadowTargetBg
                     "V6 pre-meal ACTIVE target=${preMealTarget.toInt()} ($triggerDesc); "
                 } else {
                     "V6 pre-meal skipped (target ${preMealTarget.toInt()} ≥ current ${v6TargetBg.toInt()}); "
@@ -1464,6 +1481,51 @@ open class OpenAPSBoostPlugin @Inject constructor(
         // lag0..lag5 windowed features survive an AAPS restart instead of cold-starting
         // (zero-imputed) for the first ~6 cycles. No-op after the first cycle.
         determineBasalBoost.loadMlRingBufferOnce(preferences.getBoostDosing(StringKey.ApsBoostMlRingBuffer))
+
+        // Konzept 6 dose-comparison (2026-08-25): what would THIS cycle actually have dosed with
+        // the lower pre-meal target, versus the real (unmodified) dose computed right below? Pure
+        // shadow — this RT is used ONLY for the log line here, never assigned to lastAPSResult,
+        // oapsProfile, or any persistence/NS call.
+        //
+        // MUST run BEFORE the real call below, and MUST pass riskModel = null — both deliberate,
+        // not arbitrary:
+        //  - determineBasalBoost.mlRingBuffer is a @Singleton, disk-persisted, cross-cycle buffer
+        //    designed for EXACTLY ONE push per cycle (see its own class doc). A second push here
+        //    (if riskModel were non-null) would permanently corrupt the real ML lag features —
+        //    riskModel = null skips that branch entirely, so this call cannot touch it.
+        //  - determine_basal() clears and refills the singleton's shared consoleLog/consoleError
+        //    lists on EVERY call, and the returned RT only holds a REFERENCE to them, not a copy.
+        //    Running shadow-then-real guarantees the real call's own refill (which happens after
+        //    this one) is what ends up in the RT that actually gets persisted/uploaded — running
+        //    it the other way round would silently leak this shadow run's debug text into NS.
+        //
+        // Wrapped in runCatching: a failure here must never abort the real cycle below.
+        if (shadowPreMealTargetActive) {
+            runCatching {
+                val shadowProfile = oapsProfile.copy(min_bg = shadowMinBg, max_bg = shadowMaxBg, target_bg = shadowTargetBg)
+                determineBasalBoost.determine_basal(
+                    glucose_status = glucoseStatus,
+                    currenttemp = currentTemp,
+                    iob_data_array = iobArray,
+                    profile = shadowProfile,
+                    autosens_data = autosensResult,
+                    meal_data = mealData,
+                    microBolusAllowed = microBolusAllowed,
+                    currentTime = now,
+                    flatBGsDetected = flatBGsDetected,
+                    riskModel = null,
+                    mealModel = boostMealModel,
+                    recentSmbVolume60Min = recentSmbVolume60Min,
+                    cumulativeSmbCap60Min = cumulativeSmbCap60Min,
+                    recentLowBG45Min = recentLowBG45Min,
+                    timeSinceLastSmbMin = timeSinceLastSmbMin
+                )
+            }.onSuccess { shadowRt ->
+                aapsLogger.debug(LTag.APS, "V6 pre-meal dose-comparison (SHADOW, target=${shadowTargetBg.toInt()}): would SMB=${shadowRt.units ?: 0.0}U rate=${shadowRt.rate ?: 0.0}U/h insulinReq=${shadowRt.insulinReq ?: 0.0}U — compare against the real 'Result:' line logged immediately below (same cycle)")
+            }.onFailure { e ->
+                aapsLogger.error(LTag.APS, "V6 pre-meal dose-comparison shadow call failed (non-fatal, real dosing below unaffected)", e)
+            }
+        }
 
         determineBasalBoost.determine_basal(
             glucose_status = glucoseStatus,

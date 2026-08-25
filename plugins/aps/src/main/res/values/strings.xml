@@ -192,6 +192,8 @@
     <string name="boost_hc_grant_title">Grant Health Connect access</string>
     <string name="boost_hc_grant_summary">Tap to request the Read Heart Rate permission. Until granted, AAPS does not appear in the Health Connect app list. After granting, the poll interval setting controls ingest cadence.</string>
 
+    <string name="boost_meal_alcohol_buttons_title">Meal/Alcohol Buttons</string>
+    <string name="boost_meal_alcohol_buttons_summary">Manual Overview buttons for meal and alcohol confirmation (Konzept 6)</string>
     <string name="boost_show_meal_button_title">Show MEAL button</string>
     <string name="boost_show_meal_button_summary">Tap the moment you start eating — immediately sets the pre-meal target above and trains MealTimeLearner, independent of any learned time window. Shadow-first: no dosing change until validated.</string>
     <string name="boost_show_alcohol_button_title">Show ALC button</string>
