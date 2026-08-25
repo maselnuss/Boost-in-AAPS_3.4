@@ -9,6 +9,8 @@ import android.os.HandlerThread
 import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
+import android.widget.LinearLayout
+import android.widget.RelativeLayout
 import android.widget.TextView
 
 import androidx.recyclerview.widget.LinearLayoutManager
@@ -17,8 +19,7 @@ import app.aaps.core.data.model.RM
 import app.aaps.core.data.model.TE
 import app.aaps.core.data.ue.Action
 import app.aaps.core.data.ue.Sources
-import app.aaps.core.graph.data.DataPointWithLabelInterface
-import app.aaps.core.graph.data.PointsWithLabelGraphSeries
+import app.aaps.core.graph.data.GraphViewWithCleanup
 import app.aaps.core.interfaces.aps.Loop
 import app.aaps.core.interfaces.automation.Automation
 import app.aaps.core.interfaces.configuration.Config
@@ -89,6 +90,7 @@ import io.reactivex.rxjava3.disposables.CompositeDisposable
 import io.reactivex.rxjava3.kotlin.plusAssign
 import java.util.Locale
 import java.util.concurrent.TimeUnit
+import kotlin.math.min
 import javax.inject.Inject
 import javax.inject.Provider
 
@@ -147,6 +149,11 @@ class BoostOverviewV2Fragment : DaggerFragment(), View.OnClickListener {
     private var axisWidth: Int = 0
     private var lastUserAction = ""
 
+    // 4-diagram checkbox port (2026-08-25) — dynamically built secondary graphs, one per row of
+    // overviewMenus.setting[1..4]. Rebuilt only when the row count changes (prepareGraphsIfNeeded).
+    private val secondaryGraphs = ArrayList<GraphViewWithCleanup>()
+    private val secondaryGraphsLabel = ArrayList<TextView>()
+
     @Volatile private var lastBoostStatus: BoostOverviewHelper.BoostStatus = BoostOverviewHelper.BoostStatus()
 
     private var scheduledGuiUpdate: Runnable? = null
@@ -187,22 +194,8 @@ class BoostOverviewV2Fragment : DaggerFragment(), View.OnClickListener {
         binding.v2BgGraph.gridLabelRenderer?.horizontalLabelsColor = Color.parseColor("#aaaaaa")
         binding.v2BgGraph.gridLabelRenderer?.verticalLabelsColor = Color.parseColor("#aaaaaa")
 
-        binding.v2IobGraph.gridLabelRenderer?.gridColor = gridColor
-        binding.v2IobGraph.gridLabelRenderer?.reloadStyles()
-        binding.v2IobGraph.gridLabelRenderer?.textSize = 11f * resources.displayMetrics.scaledDensity
-        binding.v2IobGraph.gridLabelRenderer?.isHorizontalLabelsVisible = false
-        binding.v2IobGraph.gridLabelRenderer?.labelVerticalWidth = axisWidth
-        binding.v2IobGraph.gridLabelRenderer?.numVerticalLabels = 3
-        binding.v2IobGraph.gridLabelRenderer?.verticalLabelsColor = Color.parseColor("#aaaaaa")
-
-        // Activity graph (steps + heart rate) — same chrome as the IOB graph
-        binding.v2SensitivityGraph.gridLabelRenderer?.gridColor = gridColor
-        binding.v2SensitivityGraph.gridLabelRenderer?.reloadStyles()
-        binding.v2SensitivityGraph.gridLabelRenderer?.textSize = 11f * resources.displayMetrics.scaledDensity
-        binding.v2SensitivityGraph.gridLabelRenderer?.isHorizontalLabelsVisible = false
-        binding.v2SensitivityGraph.gridLabelRenderer?.labelVerticalWidth = axisWidth
-        binding.v2SensitivityGraph.gridLabelRenderer?.numVerticalLabels = 3
-        binding.v2SensitivityGraph.gridLabelRenderer?.verticalLabelsColor = Color.parseColor("#aaaaaa")
+        // Secondary graphs (IOB, COB, HR, Steps, ...) are now dynamically created and styled in
+        // prepareGraphsIfNeeded(), called from updateGraph() — see there.
 
         binding.v2Notifications.setHasFixedSize(false)
         binding.v2Notifications.layoutManager = LinearLayoutManager(view.context)
@@ -415,9 +408,9 @@ class BoostOverviewV2Fragment : DaggerFragment(), View.OnClickListener {
             graph.setOnClickListener(null)
             detachAllSeries(graph)
         }
-        _binding?.v2IobGraph?.let { graph ->
-            detachAllSeries(graph)
-        }
+        secondaryGraphs.forEach { detachAllSeries(it) }
+        secondaryGraphs.clear()
+        secondaryGraphsLabel.clear()
         _binding = null
     }
 
@@ -876,60 +869,132 @@ class BoostOverviewV2Fragment : DaggerFragment(), View.OnClickListener {
             graphData.formatAxis(overviewData.fromTime, overviewData.endTime)
             graphData.performUpdate()
             graphData.applyV2Theme()
-
-            // IOB graph
-            val iobGraphData = graphDataProvider.get().with(binding.v2IobGraph, overviewData)
-            iobGraphData.addIob(true, 1.0)
-            iobGraphData.addNowLine(dateUtil.now())
-            iobGraphData.formatAxis(overviewData.fromTime, overviewData.endTime)
-            iobGraphData.performUpdate()
-            iobGraphData.applyV2Theme()
         } catch (e: Exception) {
-            aapsLogger.error(LTag.UI, "V2 BG/IOB graph render failed", e)
+            aapsLogger.error(LTag.UI, "V2 BG graph render failed", e)
             return
         }
 
-        // Activity graph (steps + heart rate) — replaces the old sensitivity preview. DATA-DRIVEN:
-        // show whichever of steps/HR actually has data in the visible window; hide the whole card
-        // only when neither does. The HR/steps series are populated unconditionally by
-        // PrepareTreatmentsDataWorker, so this does NOT depend on the chart-menu HR/STEPS toggles
-        // (those default OFF, which previously hid the graph entirely). Legacy "sensitivity" view
-        // IDs are repurposed, not renamed. Wrapped so a graph hiccup can never break the overview.
+        // Secondary graphs (2026-08-25, 4-diagram checkbox port) — up to MAX_GRAPHS-1 (4) dynamic
+        // GraphViews, one per row of menuChartSettings[1..4]. Ported from the standard
+        // OverviewFragment's secondary-graph loop; this is now the ONLY path that renders IOB, COB,
+        // ABS, deviations, BGI, sensitivity ratio, VarSens, DevSlope, HR and Steps — no more fixed
+        // always-on IOB/Activity sub-charts, so no chart type is ever attached to two GraphViews in
+        // the same cycle (the old fixed IOB graph + a checkbox-selected IOB row would have collided
+        // over the shared overviewData.iobSeries singleton).
         try {
-            val hrSeries = overviewData.heartRateGraphSeries as PointsWithLabelGraphSeries<DataPointWithLabelInterface>
-            val stepsSeries = overviewData.stepsCountGraphSeries as PointsWithLabelGraphSeries<DataPointWithLabelInterface>
-            val plotHr = !hrSeries.isEmpty
-            val plotSteps = !stepsSeries.isEmpty
-            if (plotHr || plotSteps) {
-                binding.v2SensitivityGraphContainer.visibility = View.VISIBLE
-                val actGraphData = graphDataProvider.get().with(binding.v2SensitivityGraph, overviewData)
-                val useHrForScale = plotHr && !plotSteps
-                val useStepsForScale = plotSteps
-                // Add the scale-OWNING series first so the other's multiplier is computed against the
-                // established maxY (else HR added first vs an uninitialized maxY -> flat-line trace).
-                if (plotSteps) actGraphData.addSteps(useStepsForScale, if (useStepsForScale) 1.0 else 0.8)
-                if (plotHr) actGraphData.addHeartRate(useHrForScale, if (useHrForScale) 1.0 else 0.8)
-                actGraphData.addNowLine(dateUtil.now())
-                actGraphData.formatAxis(overviewData.fromTime, overviewData.endTime)
-                actGraphData.performUpdate()
-                actGraphData.applyV2Theme()
-                binding.v2SensitivityGraphLabel.text = when {
-                    plotHr && plotSteps -> "Heart rate · Steps"
-                    plotHr              -> "Heart rate"
-                    else                -> "Steps"
+            prepareGraphsIfNeeded(menuChartSettings.size)
+            val secondaryGraphsData = ArrayList<BoostV2GraphData>()
+            val now = dateUtil.now()
+
+            for (g in 0 until min(secondaryGraphs.size, menuChartSettings.size - 1)) {
+                val row = menuChartSettings[g + 1]
+                val secondGraphData = graphDataProvider.get().with(secondaryGraphs[g], overviewData)
+                var useABSForScale = false
+                var useIobForScale = false
+                var useCobForScale = false
+                var useDevForScale = false
+                var useRatioForScale = false
+                var useVarSensForScale = false
+                var useDSForScale = false
+                var useBGIForScale = false
+                var useHRForScale = false
+                var useSTEPSForScale = false
+                when {
+                    row[OverviewMenus.CharType.ABS.ordinal]      -> useABSForScale = true
+                    row[OverviewMenus.CharType.IOB.ordinal]      -> useIobForScale = true
+                    row[OverviewMenus.CharType.COB.ordinal]      -> useCobForScale = true
+                    row[OverviewMenus.CharType.DEV.ordinal]      -> useDevForScale = true
+                    row[OverviewMenus.CharType.BGI.ordinal]      -> useBGIForScale = true
+                    row[OverviewMenus.CharType.SEN.ordinal]      -> useRatioForScale = true
+                    row[OverviewMenus.CharType.VAR_SEN.ordinal]  -> useVarSensForScale = true
+                    row[OverviewMenus.CharType.DEVSLOPE.ordinal] -> useDSForScale = true
+                    row[OverviewMenus.CharType.HR.ordinal]       -> useHRForScale = true
+                    row[OverviewMenus.CharType.STEPS.ordinal]    -> useSTEPSForScale = true
                 }
-            } else {
-                binding.v2SensitivityGraphContainer.visibility = View.GONE
+                val alignDevBgiScale = row[OverviewMenus.CharType.DEV.ordinal] && row[OverviewMenus.CharType.BGI.ordinal]
+
+                if (row[OverviewMenus.CharType.ABS.ordinal]) secondGraphData.addAbsIob(useABSForScale, 1.0)
+                if (row[OverviewMenus.CharType.IOB.ordinal]) secondGraphData.addIob(useIobForScale, 1.0)
+                if (row[OverviewMenus.CharType.COB.ordinal]) secondGraphData.addCob(useCobForScale, if (useCobForScale) 1.0 else 0.5)
+                if (row[OverviewMenus.CharType.DEV.ordinal]) secondGraphData.addDeviations(useDevForScale, 1.0)
+                if (row[OverviewMenus.CharType.BGI.ordinal]) secondGraphData.addMinusBGI(useBGIForScale, if (alignDevBgiScale) 1.0 else 0.8)
+                if (row[OverviewMenus.CharType.SEN.ordinal]) secondGraphData.addRatio(useRatioForScale, if (useRatioForScale) 1.0 else 0.8)
+                if (row[OverviewMenus.CharType.VAR_SEN.ordinal]) secondGraphData.addVarSens(useVarSensForScale, if (useVarSensForScale) 1.0 else 0.8)
+                if (row[OverviewMenus.CharType.DEVSLOPE.ordinal] && config.isDev())
+                    secondGraphData.addDeviationSlope(useDSForScale, if (useDSForScale) 1.0 else 0.8, useRatioForScale)
+                if (row[OverviewMenus.CharType.HR.ordinal]) secondGraphData.addHeartRate(useHRForScale, if (useHRForScale) 1.0 else 0.8)
+                if (row[OverviewMenus.CharType.STEPS.ordinal]) secondGraphData.addSteps(useSTEPSForScale, if (useSTEPSForScale) 1.0 else 0.8)
+
+                secondGraphData.addNowLine(now)
+                secondGraphData.formatAxis(overviewData.fromTime, overviewData.endTime)
+                secondGraphData.applyV2Theme()
+                secondaryGraphsData.add(secondGraphData)
+            }
+            for (g in 0 until min(secondaryGraphs.size, menuChartSettings.size - 1)) {
+                val row = menuChartSettings[g + 1]
+                secondaryGraphsLabel[g].text = overviewMenus.enabledTypes(g + 1)
+                secondaryGraphs[g].visibility = (
+                    row[OverviewMenus.CharType.ABS.ordinal] || row[OverviewMenus.CharType.IOB.ordinal] ||
+                        row[OverviewMenus.CharType.COB.ordinal] || row[OverviewMenus.CharType.DEV.ordinal] ||
+                        row[OverviewMenus.CharType.BGI.ordinal] || row[OverviewMenus.CharType.SEN.ordinal] ||
+                        row[OverviewMenus.CharType.VAR_SEN.ordinal] || row[OverviewMenus.CharType.DEVSLOPE.ordinal] ||
+                        row[OverviewMenus.CharType.HR.ordinal] || row[OverviewMenus.CharType.STEPS.ordinal]
+                    ).toVisibility()
+                secondaryGraphsData[g].performUpdate()
             }
         } catch (e: Exception) {
-            aapsLogger.error(LTag.UI, "V2 activity (steps/HR) graph failed", e)
-            binding.v2SensitivityGraphContainer.visibility = View.GONE
+            aapsLogger.error(LTag.UI, "V2 secondary graphs render failed", e)
         }
 
         // TalkBack
         val hours = overviewData.rangeToDisplay
         binding.v2BgGraph.contentDescription = "Blood glucose graph, ${hours} hour view"
-        binding.v2IobGraph.contentDescription = "Insulin on board graph, ${hours} hour view"
+    }
+
+    /** 4-diagram checkbox port (2026-08-25) — ported from OverviewFragment.prepareGraphsIfNeeded(),
+     *  adapted to V2's dark styling/fixed 100dp sub-chart height and its own container/id. Only
+     *  rebuilds when the row count actually changed (checkbox popup add/remove-graph). */
+    private fun prepareGraphsIfNeeded(numOfGraphs: Int) {
+        if (numOfGraphs == secondaryGraphs.size + 1) return
+        secondaryGraphs.clear()
+        secondaryGraphsLabel.clear()
+        binding.v2SecondaryGraphs.removeAllViews()
+        val ctx = context ?: return
+        (1 until numOfGraphs).forEach { _ ->
+            val relativeLayout = RelativeLayout(ctx)
+            relativeLayout.layoutParams = RelativeLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+
+            val graph = GraphViewWithCleanup(ctx)
+            graph.layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, rh.dpToPx(100)).also {
+                it.setMargins(0, rh.dpToPx(15), 0, rh.dpToPx(10))
+            }
+            // gridColor/verticalLabelsColor deliberately NOT set here — applyV2Theme() sets both
+            // (to the same values) every updateGraph() cycle, including this one, before anything
+            // is actually drawn. Only the structural properties that applyV2Theme() never touches
+            // go here.
+            graph.gridLabelRenderer?.reloadStyles()
+            graph.gridLabelRenderer?.textSize = 11f * resources.displayMetrics.scaledDensity
+            graph.gridLabelRenderer?.isHorizontalLabelsVisible = false
+            graph.gridLabelRenderer?.labelVerticalWidth = axisWidth
+            graph.gridLabelRenderer?.numVerticalLabels = 3
+            relativeLayout.addView(graph)
+
+            val label = TextView(ctx)
+            val layoutParams = RelativeLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT).also {
+                it.setMargins(rh.dpToPx(30), rh.dpToPx(6), 0, 0)
+            }
+            layoutParams.addRule(RelativeLayout.ALIGN_PARENT_TOP)
+            layoutParams.addRule(RelativeLayout.ALIGN_PARENT_START)
+            label.layoutParams = layoutParams
+            label.setTextColor(Color.parseColor("#9aa0ad"))
+            label.textSize = 10f
+            label.letterSpacing = 0.05f
+            relativeLayout.addView(label)
+            secondaryGraphsLabel.add(label)
+
+            binding.v2SecondaryGraphs.addView(relativeLayout)
+            secondaryGraphs.add(graph)
+        }
     }
 
     // --- Notifications ---

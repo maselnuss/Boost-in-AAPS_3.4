@@ -727,62 +727,18 @@
                         android:layout_marginEnd="8dp"
                         android:background="#1a1d28" />
 
-                    <!-- IOB sub-chart -->
-                    <RelativeLayout
-                        android:layout_width="match_parent"
-                        android:layout_height="wrap_content">
-
-                        <com.jjoe64.graphview.GraphView
-                            android:id="@+id/v2_iob_graph"
-                            android:layout_width="match_parent"
-                            android:layout_height="100dp"
-                            android:contentDescription="@string/iob" />
-
-                        <TextView
-                            android:id="@+id/v2_iob_graph_label"
-                            android:layout_width="wrap_content"
-                            android:layout_height="wrap_content"
-                            android:layout_alignParentTop="true"
-                            android:layout_alignParentStart="true"
-                            android:layout_marginStart="30dp"
-                            android:layout_marginTop="6dp"
-                            android:text="IOB"
-                            android:textSize="10sp"
-                            android:textColor="#9aa0ad"
-                            android:letterSpacing="0.05"
-                            android:importantForAccessibility="no"
-                            tools:ignore="HardcodedText" />
-                    </RelativeLayout>
-
-                    <!-- Sensitivity graph container (hidden unless data available) -->
-                    <RelativeLayout
-                        android:id="@+id/v2_sensitivity_graph_container"
+                    <!-- Secondary graphs (Konzept: 4-diagram checkbox port, 2026-08-25) — up to
+                         MAX_GRAPHS-1 (4) GraphViews built dynamically by prepareGraphsIfNeeded(),
+                         one per row of overviewMenus.setting[1..4]. Replaces the old fixed/always-on
+                         IOB + Sensitivity(HR/Steps) sub-charts: those hardcoded, checkbox-independent
+                         calls collided with this same checkbox-driven system over shared singleton
+                         series on OverviewData (e.g. overviewData.iobSeries), so ALL chart types now
+                         go through exactly one rendering path — this one. -->
+                    <LinearLayout
+                        android:id="@+id/v2_secondary_graphs"
                         android:layout_width="match_parent"
                         android:layout_height="wrap_content"
-                        android:visibility="gone">
-
-                        <com.jjoe64.graphview.GraphView
-                            android:id="@+id/v2_sensitivity_graph"
-                            android:layout_width="match_parent"
-                            android:layout_height="100dp"
-                            android:contentDescription="Sensitivity ratio over time"
-                            tools:ignore="HardcodedText" />
-
-                        <TextView
-                            android:id="@+id/v2_sensitivity_graph_label"
-                            android:layout_width="wrap_content"
-                            android:layout_height="wrap_content"
-                            android:layout_alignParentTop="true"
-                            android:layout_alignParentStart="true"
-                            android:layout_marginStart="30dp"
-                            android:layout_marginTop="4dp"
-                            android:text="Sensitivity"
-                            android:textSize="10sp"
-                            android:textColor="#9aa0ad"
-                            android:letterSpacing="0.05"
-                            android:importantForAccessibility="no"
-                            tools:ignore="HardcodedText" />
-                    </RelativeLayout>
+                        android:orientation="vertical" />
 
                 </LinearLayout>
             </com.google.android.material.card.MaterialCardView>
