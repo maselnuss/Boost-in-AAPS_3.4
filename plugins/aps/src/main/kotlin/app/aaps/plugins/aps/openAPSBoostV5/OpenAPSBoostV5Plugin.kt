@@ -1,6 +1,16 @@
 package app.aaps.plugins.aps.openAPSBoostV5
 
 import android.content.Context
+import android.graphics.Color
+import android.graphics.Typeface
+import android.text.Spannable
+import android.text.SpannableString
+import android.text.style.ForegroundColorSpan
+import android.view.Gravity
+import android.widget.CheckBox
+import android.widget.LinearLayout
+import android.widget.ScrollView
+import android.widget.TextView
 import androidx.preference.PreferenceCategory
 import androidx.preference.PreferenceFragmentCompat
 import androidx.preference.PreferenceManager
@@ -459,6 +469,35 @@ open class OpenAPSBoostV5Plugin @Inject constructor(
     }
 
     /**
+     * Dialog-only rendering of a review item's rationale. [BoostV5AutoConfig.rationaleByKey] is
+     * shared with the NS reason/consoleError log — precise and technical, written for retrospective
+     * analysis, not for a quick-glance settings dialog. Found on review (2026-08-26): maxIOB/Bolus
+     * read as self-contradictory next to a value that IS changing ("carried from your CURRENT
+     * setting"), Primer is dense with internal dev jargon (temp-basal accounting details), and
+     * Aggression/FloorSlewAggressiveness reference "shadow" — this project's internal terminology,
+     * meaningless outside it. Doesn't touch [BoostV5AutoConfig.kt] itself (NS/log/tests stay
+     * precise) — purely how the SAME rationale renders here.
+     */
+    private fun dialogRationale(key: DoubleKey, rawRationale: String): String = when (key) {
+        DoubleKey.ApsBoostMaxIob ->
+            "Matches your AAPS maxIOB constraint — not currently mirrored in this Boost setting."
+        DoubleKey.ApsBoostBolus ->
+            "Matches your AAPS max-bolus constraint — not currently mirrored in this Boost setting."
+        DoubleKey.ApsBoostV5PrimerCapU ->
+            "Small early dose while a meal is still being confirmed, sized from your own typical SMB amount. " +
+                if (rawRationale.contains("retractable temp-basal")) "Delivered as a temp-basal that can unwind safely."
+                else "Delivered as a small bolus."
+        // Aggression and FloorSlewAggressiveness both end "(... ; shadow-only/refines after ...)" —
+        // drop the internal-jargon clause after the ";", keep the plain-language reason before it.
+        DoubleKey.ApsBoostV5Aggression, DoubleKey.ApsBoostFloorSlewAggressiveness ->
+            rawRationale.substringAfter("(").substringBefore(";").trim().replaceFirstChar { it.uppercase() }
+        // Generic case (HypoCaution, the caps): strip the redundant leading "<Name> <value>" — the
+        // bold title line above already shows both — keep just the parenthetical "why".
+        else ->
+            rawRationale.substringAfter("(").substringBeforeLast(")").trim().replaceFirstChar { it.uppercase() }
+    }
+
+    /**
      * The Konzept 7 review dialog. Same construction pattern as every other AAPS dialog
      * ([app.aaps.core.ui.dialogs.OKDialog]): [MaterialAlertDialogBuilder] with
      * [app.aaps.core.ui.R.style.DialogTheme] + [AlertDialogHelper.buildCustomTitle] — this alone is
@@ -475,11 +514,64 @@ open class OpenAPSBoostV5Plugin @Inject constructor(
      * already IS "apply all" via the positive button.
      */
     private fun showPeriodicReviewDialog(context: Context, items: List<BoostV5PeriodicReview.ReviewItem>) {
-        val labels = items.map { item ->
+        val density = context.resources.displayMetrics.density
+        fun dp(v: Int) = (v * density).toInt()
+
+        // Custom row layout instead of setMultiChoiceItems: the built-in list item centers its
+        // checkbox against the WHOLE (multi-line) text block, which looks misaligned once the
+        // rationale line wraps to 2-3 lines (confirmed on-device, 2026-08-26 — user feedback: looked
+        // "unübersichtlich", checkbox didn't line up with anything). Here each row is built by hand
+        // — checkbox top-aligned to the bold title line specifically, with a smaller/dimmer
+        // rationale line below it — a clear title/detail hierarchy instead of one dense paragraph.
+        // No hardcoded colors (theme-safe light/dark): the rationale is de-emphasised via alpha on
+        // the theme's own default text color, not a fixed color value.
+        val checkBoxes = mutableListOf<CheckBox>()
+        val container = LinearLayout(context).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(24), dp(8), dp(24), dp(8))
+        }
+        for (item in items) {
+            val name = shortName(item.key)
             val tunedMarker = if (item.wasUserTuned) " " + rh.gs(R.string.boost_v5_periodic_review_manually_set_marker) else ""
-            "${shortName(item.key)}$tunedMarker: ${item.currentValue} → ${item.suggestedValue}\n${item.rationale}" as CharSequence
-        }.toTypedArray()
-        val checked = BooleanArray(items.size) { true }
+            val checkBox = CheckBox(context).apply { isChecked = true }
+            checkBoxes += checkBox
+            // Delta gets its own color (on top of the title's overall bold) so the actual CHANGE —
+            // not just the knob name — jumps out, per feedback: it was "hidden in the text" before.
+            // Standard Material palette green/red (500-weight — designed to read on light AND dark
+            // surfaces, unlike the app's BG-specific high/low colors which carry a different meaning
+            // here and would be confusing: this is an increase/decrease of a SETTING, not a glucose
+            // reading).
+            val prefix = "$name$tunedMarker: "
+            val delta = "${item.currentValue} → ${item.suggestedValue}"
+            val deltaColor = if (item.suggestedValue > item.currentValue) Color.parseColor("#4CAF50") else Color.parseColor("#F44336")
+            val titleView = TextView(context).apply {
+                text = SpannableString(prefix + delta).apply {
+                    setSpan(ForegroundColorSpan(deltaColor), prefix.length, prefix.length + delta.length, Spannable.SPAN_EXCLUSIVE_EXCLUSIVE)
+                }
+                setTypeface(typeface, Typeface.BOLD)
+            }
+            val rationaleView = TextView(context).apply {
+                text = dialogRationale(item.key, item.rationale)
+                textSize = 13f
+                alpha = 0.7f
+                setPadding(0, dp(2), 0, 0)
+            }
+            val textColumn = LinearLayout(context).apply {
+                orientation = LinearLayout.VERTICAL
+                layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+                addView(titleView)
+                addView(rationaleView)
+            }
+            val row = LinearLayout(context).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.TOP
+                setPadding(0, dp(10), 0, dp(10))
+                addView(checkBox)
+                addView(textColumn)
+            }
+            container.addView(row)
+        }
+        val scrollableContent = ScrollView(context).apply { addView(container) }
 
         // Items were computed when the notification fired, which may have been days ago (14-day
         // interval; nothing forces an immediate tap). If the user ALSO changed one of the same
@@ -524,9 +616,9 @@ open class OpenAPSBoostV5Plugin @Inject constructor(
 
         MaterialAlertDialogBuilder(context, app.aaps.core.ui.R.style.DialogTheme)
             .setCustomTitle(AlertDialogHelper.buildCustomTitle(context, rh.gs(R.string.boost_v5_periodic_review_dialog_title)))
-            .setMultiChoiceItems(labels, checked) { _, which, isChecked -> checked[which] = isChecked }
+            .setView(scrollableContent)
             .setPositiveButton(rh.gs(R.string.boost_v5_periodic_review_apply_selected)) { dialog, _ ->
-                applyItems(checked.indices.filter { checked[it] })
+                applyItems(checkBoxes.indices.filter { checkBoxes[it].isChecked })
                 dialog.dismiss()
             }
             .setNegativeButton(rh.gs(R.string.boost_v5_periodic_review_discard)) { dialog, _ -> dialog.dismiss() }
