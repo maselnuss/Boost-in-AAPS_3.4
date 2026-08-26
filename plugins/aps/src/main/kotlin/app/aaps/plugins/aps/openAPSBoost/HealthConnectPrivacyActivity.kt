@@ -19,9 +19,9 @@ import android.widget.TextView
  * The Activity itself just renders a plain-text explanation of why AAPS reads
  * this data. No outbound network call, no analytics, no data leaves the device.
  *
- * Text updated 2026-08-26 (Konzept 9) to also cover Exercise (Konzept 8, was
- * missing from this screen since it launched) and the new Sleep/Resting-HR
- * permissions — this screen should describe everything actually requested.
+ * Text updated 2026-08-26 to also cover Exercise (Konzept 8, was missing from
+ * this screen since it launched) — this screen should describe everything
+ * actually requested.
  */
 class HealthConnectPrivacyActivity : Activity() {
 
@@ -50,11 +50,6 @@ class HealthConnectPrivacyActivity : Activity() {
                 • Learn your resting heart rate over a rolling 28-day window
                   for more accurate sleep-state detection and Karvonen heart
                   rate reserve calculations for exercise classification.
-
-                • Compare the watch's own sleep-session and resting-heart-rate
-                  readings against AndroidAPS's own heart-rate-derived sleep
-                  detection, purely as a logged second opinion — this never
-                  changes dosing or targets on its own.
 
                 What happens to the data
 

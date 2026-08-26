@@ -85,10 +85,6 @@ enum class BooleanKey(
     // Konzept 8 (2026-08-26) — SHADOW ONLY. Reads Health Connect ExerciseSessionRecord (watch-native
     // training entries), logs exercise detection, never touches TT/dosing on its own.
     ApsBoostHealthConnectExerciseEnabled("boost_health_connect_exercise_enabled", false, defaultedBySM = true),
-    // Konzept 9 (2026-08-26) — SHADOW ONLY. Reads Health Connect SleepSessionRecord/RestingHeartRateRecord
-    // (the watch's own sleep-tracking verdict) purely as a second opinion logged next to Boost's existing
-    // HR-derived SleepStateDetector — never overrides it, never touches TT/dosing.
-    ApsBoostHealthConnectSleepEnabled("boost_health_connect_sleep_enabled", false, defaultedBySM = true),
     ApsBoostBypassVersionCheck("boost_bypass_version_check", true, defaultedBySM = true),
     // Boost V5 active-dosing alpha (2026-06-11) — when ON, V5's observe-confirm-commit SMB REPLACES
     // V1's SMB on cycles V1 permits one. V1 still owns basal + all safety gates. Toggle OFF = instant revert.
