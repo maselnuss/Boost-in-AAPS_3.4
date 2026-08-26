@@ -158,7 +158,6 @@
     <string name="boost_v5_periodic_review_dialog_title">Boost V6 Setting Review</string>
     <string name="boost_v5_periodic_review_manually_set_marker">(manually set)</string>
     <string name="boost_v5_periodic_review_apply_selected">Apply selected</string>
-    <string name="boost_v5_periodic_review_apply_all">Apply all</string>
     <string name="boost_v5_periodic_review_discard">Discard</string>
     <string name="boost_v5_periodic_review_applied_toast">Boost V6 review: updated %1$d setting(s).</string>
     <string name="boost_v5_periodic_review_skipped_stale_toast">Boost V6 review: skipped %1$d setting(s) that changed since this review was computed — re-open Review to reconsider them.</string>

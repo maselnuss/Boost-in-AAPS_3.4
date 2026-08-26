@@ -401,8 +401,9 @@ open class OpenAPSBoostV5Plugin @Inject constructor(
      * bypass of "a human decision takes precedence") from the user's CURRENT V1 history and diff
      * against the CURRENTLY operative value ([BoostV5PeriodicReview]). If anything differs, surface
      * ONE notification; tapping it opens a single dialog listing every changed item with its own
-     * rationale and a "manually set" marker where applicable, with per-item checkboxes plus
-     * bulk apply-all/discard. Nothing is written until the user confirms in the dialog.
+     * rationale and a "manually set" marker where applicable, with per-item checkboxes (all
+     * pre-checked — unchecking is opt-out, not opt-in) plus apply/discard. Nothing is written until
+     * the user confirms in the dialog.
      */
     private fun maybePeriodicReview(now: Long, profileProvider: () -> BoostV5AutoConfig.V1Profile) {
         val lastReview = preferences.get(LongNonKey.ApsBoostV5PeriodicReviewLastMs)
@@ -465,8 +466,13 @@ open class OpenAPSBoostV5Plugin @Inject constructor(
      * One checkbox per changed knob (all pre-checked — these are reasoned, backtested-formula
      * suggestions), each row showing current → suggested plus its own rationale and a
      * "manually set" marker when the current value was a deliberate prior choice (not a factory
-     * default). Three actions: Apply selected (positive, respects checkboxes), Apply all (neutral,
-     * ignores checkbox state), Discard (negative, writes nothing).
+     * default). Two actions: Apply selected (positive, respects checkboxes — pre-checked, so doing
+     * nothing and tapping this already applies everything) and Discard (negative, writes nothing).
+     * Deliberately NOT a third "Apply all" button: with a long item list the standard Android
+     * AlertDialog stacks 3 buttons vertically and can push the lower ones off-screen (confirmed
+     * 2026-08-26 on-device, an 8-item list hid both Apply-all and Discard) — 2 buttons always fit
+     * side-by-side. "Apply all" was redundant anyway: unchecking is opt-out, so an untouched dialog
+     * already IS "apply all" via the positive button.
      */
     private fun showPeriodicReviewDialog(context: Context, items: List<BoostV5PeriodicReview.ReviewItem>) {
         val labels = items.map { item ->
@@ -521,10 +527,6 @@ open class OpenAPSBoostV5Plugin @Inject constructor(
             .setMultiChoiceItems(labels, checked) { _, which, isChecked -> checked[which] = isChecked }
             .setPositiveButton(rh.gs(R.string.boost_v5_periodic_review_apply_selected)) { dialog, _ ->
                 applyItems(checked.indices.filter { checked[it] })
-                dialog.dismiss()
-            }
-            .setNeutralButton(rh.gs(R.string.boost_v5_periodic_review_apply_all)) { dialog, _ ->
-                applyItems(items.indices.toList())
                 dialog.dismiss()
             }
             .setNegativeButton(rh.gs(R.string.boost_v5_periodic_review_discard)) { dialog, _ -> dialog.dismiss() }
