@@ -1815,12 +1815,26 @@ open class OpenAPSBoostPlugin @Inject constructor(
         ).also {
             // NS-visible shadow notes captured earlier in this cycle, BEFORE this rT object existed
             // (2026-08-26) — exercise-detection (Konzept 8), post-exercise-recovery duration/hyper-
-            // brake proposals, and the V6 pre-meal dose-comparison. Appended here, first thing inside
-            // this block, so they land in it.reason regardless of what happens further down.
-            if (exerciseShadowNsNotes.isNotEmpty()) it.reason.append(exerciseShadowNsNotes)
-            if (postExerciseShadowNsNotes.isNotEmpty()) it.reason.append(postExerciseShadowNsNotes)
-            v6PreMealShadowNsNote?.let { note -> it.reason.append(note) }
-            floorSlewNsNote?.let { note -> it.reason.append(note) }
+            // brake proposals, the V6 pre-meal dose-comparison, and the floor/slew estimate. Appended
+            // here, first thing inside this block, so they land in it.reason regardless of what
+            // happens further down. Also mirrored into consoleError (2026-08-26) so the same notes
+            // show up in-app on the Boost V6 "Script debug" screen, not just in Nightscout.
+            if (exerciseShadowNsNotes.isNotEmpty()) {
+                it.reason.append(exerciseShadowNsNotes)
+                it.consoleError?.add(exerciseShadowNsNotes.toString().trimEnd(' ', ';'))
+            }
+            if (postExerciseShadowNsNotes.isNotEmpty()) {
+                it.reason.append(postExerciseShadowNsNotes)
+                it.consoleError?.add(postExerciseShadowNsNotes.toString().trimEnd(' ', ';'))
+            }
+            v6PreMealShadowNsNote?.let { note ->
+                it.reason.append(note)
+                it.consoleError?.add(note.trimEnd(' ', ';'))
+            }
+            floorSlewNsNote?.let { note ->
+                it.reason.append(note)
+                it.consoleError?.add(note.trimEnd(' ', ';'))
+            }
 
             // ISF shadow telemetry — V1's actual variable_sens used the instantaneous
             // ratio = tdd24/tdd7; V4.4.2 would use an EMA(τ=3h) of the same. Compute
@@ -2558,8 +2572,11 @@ open class OpenAPSBoostPlugin @Inject constructor(
                 val suppressedUnits = actualUnits * (1.0 - alcoholShadowMultiplier)
                 aapsLogger.debug(LTag.APS, "Alcohol dose-comparison (SHADOW, intensity=$alcoholIntensity, multiplier=$alcoholShadowMultiplier): actual final SMB=${actualUnits}U → would suppress ${suppressedUnits}U — see the real 'Result:' line immediately below (same cycle, same value)")
                 // NS-visible condensed form (2026-08-26) — see the "NS-visible condensed notes"
-                // comment near the exercise-shadow block above for why.
-                it.reason.append("alcoholShadow: intensity=$alcoholIntensity actualSMB=${Round.roundTo(actualUnits, 0.01)}U wouldSuppressBy=${Round.roundTo(suppressedUnits, 0.01)}U; ")
+                // comment near the exercise-shadow block above for why. Also mirrored into
+                // consoleError so it shows up in-app on the Boost V6 "Script debug" screen too.
+                val alcoholShadowNote = "alcoholShadow: intensity=$alcoholIntensity actualSMB=${Round.roundTo(actualUnits, 0.01)}U wouldSuppressBy=${Round.roundTo(suppressedUnits, 0.01)}U"
+                it.reason.append("$alcoholShadowNote; ")
+                it.consoleError?.add(alcoholShadowNote)
             }
 
             val determineBasalResult = apsResultProvider.get().with(it)
