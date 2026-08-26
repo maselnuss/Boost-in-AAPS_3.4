@@ -70,6 +70,20 @@ class BoostV5AutoConfigTest {
         assertThat(s.aggression).isAtMost(1.0)
     }
 
+    // 2026-08-26 — UNLIKE Aggression/HypoCaution, floor/slew aggressiveness IS bidirectional
+    // (shadow-only, no live-dosing risk): hypo-prone raises it (stricter floor), well-controlled
+    // lowers it (looser floor), in-between stays neutral.
+    @Test fun `floor-slew aggressiveness raises for hypo-prone, neutral for in-target, lowers for well-controlled`() {
+        val hypoProne = BoostV5AutoConfig.compute(profile(tbr70 = 8.0, sev54 = 2.5))!!
+        val inTarget = BoostV5AutoConfig.compute(profile(tbr70 = 2.5, sev54 = 0.2))!!
+        val wellControlled = BoostV5AutoConfig.compute(profile(tbr70 = 0.6, sev54 = 0.1))!!
+        assertThat(hypoProne.floorSlewAggressiveness).isGreaterThan(100.0)
+        assertThat(inTarget.floorSlewAggressiveness).isEqualTo(100.0)
+        assertThat(wellControlled.floorSlewAggressiveness).isLessThan(100.0)
+        assertThat(hypoProne.floorSlewAggressiveness).isAtMost(150.0)
+        assertThat(wellControlled.floorSlewAggressiveness).isAtLeast(50.0)
+    }
+
     @Test fun `caps derive from dose distribution and clamp to ranges`() {
         val s = BoostV5AutoConfig.compute(
             profile(
@@ -160,6 +174,17 @@ class BoostV5AutoConfigTest {
         // Amendment 2026-07-06 (#6): the committedCap rationale is honest about BOTH terms — the
         // TDD/40 floor binds for most cohort users, not just "routine SMB size".
         assertThat(s.rationale.any { it.contains("Committed cap") && it.contains("TDD/40") }).isTrue()
+    }
+
+    // 2026-08-26 — Konzept 7 needs a per-key rationale, not just the flat log line, to show each
+    // review item's own reasoning in the dialog.
+    @Test fun `rationaleByKey covers every managed double knob plus floor-slew aggressiveness`() {
+        val s = BoostV5AutoConfig.compute(profile())!!
+        val expectedKeys = BoostV5AutoConfigApply.managedDoubleKeys + DoubleKey.ApsBoostFloorSlewAggressiveness
+        for (key in expectedKeys) {
+            assertThat(s.rationaleByKey).containsKey(key)
+            assertThat(s.rationaleByKey.getValue(key)).isNotEmpty()
+        }
     }
 
     // ── Application of the suggestion (BoostV5AutoConfigApply): per-key resolution ──

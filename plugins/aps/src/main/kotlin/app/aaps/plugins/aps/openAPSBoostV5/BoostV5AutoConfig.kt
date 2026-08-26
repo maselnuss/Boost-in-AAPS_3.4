@@ -1,5 +1,6 @@
 package app.aaps.plugins.aps.openAPSBoostV5
 
+import app.aaps.core.keys.DoubleKey
 import kotlin.math.max
 import kotlin.math.min
 
@@ -98,7 +99,17 @@ object BoostV5AutoConfig {
         // 2026-07-20 V1-acceleration primer: per-user fizzle-safe base (0 = off) + delivery routing.
         val primerCapU: Double,
         val primerTbrFallback: Boolean,
-        val rationale: List<String>
+        // 2026-08-26 — floor/slew shadow (BoostFloorSlewShadow) aggressiveness scale [50..150],
+        // see the derivation comment in compute() for why this one is bidirectional unlike
+        // aggression/hypoCaution above.
+        val floorSlewAggressiveness: Double,
+        val rationale: List<String>,
+        // 2026-08-26 — Konzept 7 (periodic review): same reasoning as [rationale] but keyed per
+        // managed DoubleKey, so the review dialog can show each item's OWN rationale rather than the
+        // full unkeyed log line. Covers every key in BoostV5AutoConfigApply.managedDoubleKeys plus
+        // ApsBoostFloorSlewAggressiveness. Not exhaustive for boolean knobs (fastCarbConfirm etc.) —
+        // Konzept 7 only reviews the double-valued knobs.
+        val rationaleByKey: Map<DoubleKey, String>
     )
 
     /** Returns null when there isn't enough data to responsibly auto-configure. */
@@ -106,14 +117,22 @@ object BoostV5AutoConfig {
         if (p.daysWithData < MIN_DAYS || p.bgReadingCount < MIN_BG_READINGS) return null
 
         val reasons = mutableListOf<String>()
+        val rationaleByKey = mutableMapOf<DoubleKey, String>()
         val hypoProne = p.timeBelow54Pct > SEV54_HYPO_PRONE || p.tbrBelow70Pct > TBR70_HYPO_PRONE
+        // Moved up from its original spot below (still used there too) — the new floor/slew
+        // aggressiveness derivation needs it alongside hypoProne.
+        val wellControlled = p.tbrBelow70Pct < WELL_CONTROLLED_MAX_TBR70 && p.timeBelow54Pct < WELL_CONTROLLED_MAX_SEV54
 
         // HypoCaution [1.0..2.0]: scale up with time-below-range above target.
         val cautionRaw = 1.0 +
             max(0.0, p.tbrBelow70Pct - TBR70_TARGET) / 4.0 +       // +1.0 per +4% TBR over target
             max(0.0, p.timeBelow54Pct - SEV54_TARGET) * 0.5         // +0.5 per +1% severe over target
         val hypoCaution = round1(cautionRaw.coerceIn(1.0, 2.0))
-        reasons += "HypoCaution $hypoCaution (TBR<70 ${pct(p.tbrBelow70Pct)}, <54 ${pct(p.timeBelow54Pct)} vs targets 4%/1%)"
+        run {
+            val why = "HypoCaution $hypoCaution (TBR<70 ${pct(p.tbrBelow70Pct)}, <54 ${pct(p.timeBelow54Pct)} vs targets 4%/1%)"
+            reasons += why
+            rationaleByKey[DoubleKey.ApsBoostV5HypoCaution] = why
+        }
 
         // Aggression [0.7..1.3]: NEVER auto-raise above 1.0. Ease down for a hypo-prone history.
         val aggression = round2(
@@ -123,7 +142,11 @@ object BoostV5AutoConfig {
                 else                                            -> 1.0
             }
         )
-        reasons += "Aggression $aggression (start ${if (aggression < 1.0) "gentle — hypo history" else "neutral"}; refines after shadow period)"
+        run {
+            val why = "Aggression $aggression (start ${if (aggression < 1.0) "gentle — hypo history" else "neutral"}; refines after shadow period)"
+            reasons += why
+            rationaleByKey[DoubleKey.ApsBoostV5Aggression] = why
+        }
 
         // Confirmed cap [1.5..7.5]: cover their biggest typical single dose (meal bolus p90 or SMB
         // p95). The manual-bolus p90 participates only with a statistically honest sample
@@ -133,21 +156,35 @@ object BoostV5AutoConfig {
         val confirmedCapU = round2(
             max(manualP90, percentile(p.smbAmountsU, 95.0)).coerceIn(1.5, 7.5)
         )
-        reasons += "Confirmed cap ${confirmedCapU}U (≈ your biggest typical single dose)"
+        run {
+            val why = "Confirmed cap ${confirmedCapU}U (≈ your biggest typical single dose)"
+            reasons += why
+            rationaleByKey[DoubleKey.ApsBoostV5ConfirmedCapU] = why
+        }
 
         // Committed cap [0.25..2.5]: routine per-cycle hold = max(typical SMB p75, TDD/40), floored.
         val committedCapU = round2(
             max(percentile(p.smbAmountsU, 75.0), p.tddMedianU / 40.0).coerceIn(0.25, 2.5)
         )
-        reasons += "Committed cap ${committedCapU}U (max of your routine SMB size and TDD/40)"
+        run {
+            val why = "Committed cap ${committedCapU}U (max of your routine SMB size and TDD/40)"
+            reasons += why
+            rationaleByKey[DoubleKey.ApsBoostV5CommittedCapU] = why
+        }
 
         val cumulativeSmbCap60MinU = cumulativeCap60Min(confirmedCapU, committedCapU)
-        reasons += "Cumulative SMB cap/60min ${cumulativeSmbCap60MinU}U (limits dose frequency)"
+        run {
+            val why = "Cumulative SMB cap/60min ${cumulativeSmbCap60MinU}U (limits dose frequency)"
+            reasons += why
+            rationaleByKey[DoubleKey.ApsBoostCumulativeSmbCap60Min] = why
+        }
 
         // Carry proven constraints.
         val maxIobU = round1(p.currentMaxIobU.coerceIn(0.1, 12.0))
         val bolusCapU = round1(p.currentMaxBolusU.coerceIn(0.1, 10.0))
         reasons += "maxIOB ${maxIobU}U / bolus cap ${bolusCapU}U carried from your AAPS settings"
+        rationaleByKey[DoubleKey.ApsBoostMaxIob] = "maxIOB ${maxIobU}U carried from your current AAPS maxIOB setting"
+        rationaleByKey[DoubleKey.ApsBoostBolus] = "Bolus cap ${bolusCapU}U carried from your current AAPS max bolus setting"
 
         // Fast-carb confirm: keep on unless markedly hypo-prone (then off for caution).
         val fastCarbConfirm = !hypoProne
@@ -158,7 +195,6 @@ object BoostV5AutoConfig {
         // little insulin, so the bar is tighter than fastCarbConfirm's !hypoProne. A user can still
         // enable either manually; this only sets a safe default. (Velocity-budget floor ALSO has a
         // live fail-closed 14d-TBR gate downstream.)
-        val wellControlled = p.tbrBelow70Pct < WELL_CONTROLLED_MAX_TBR70 && p.timeBelow54Pct < WELL_CONTROLLED_MAX_SEV54
         val aggressiveEarlyConfirm = wellControlled
         val velocityBudgetFloor = wellControlled
         reasons += if (wellControlled)
@@ -183,7 +219,40 @@ object BoostV5AutoConfig {
         // so the primer cap is NOT raise-guarded — the delivery routing is the safety differentiator.
         // A user can force the bolus via ApsBoostV5PrimerBolusMode (the override).
         val primerTbrFallback = !wellControlled
-        reasons += "Primer ${primerCapU}U ${if (primerTbrFallback) "via retractable temp-basal (override-able to bolus)" else "as bolus (well-controlled)"} — reclaims V1's ~15-min earlier acceleration response, fizzle-safe by size, netted off the commit-shot"
+        run {
+            val why = "Primer ${primerCapU}U ${if (primerTbrFallback) "via retractable temp-basal (override-able to bolus)" else "as bolus (well-controlled)"} — reclaims V1's ~15-min earlier acceleration response, fizzle-safe by size, netted off the commit-shot"
+            reasons += why
+            rationaleByKey[DoubleKey.ApsBoostV5PrimerCapU] = why
+        }
+
+        // Floor/slew aggressiveness [50..150], default 100 (neutral): UNLIKE Aggression/HypoCaution
+        // above, this one is bidirectional by design. It scales BoostFloorSlewShadow's floor% (higher
+        // = stricter compression floor) and its slew%/cycle (higher aggressiveness = faster-allowed
+        // change, i.e. LESS restrictive there — see BoostFloorSlewShadow's own divide-vs-multiply
+        // split). For a hypo-prone history, tightening the floor is the safety-adding direction — the
+        // same reasoning that eases Aggression down applies here as a reason to raise this value, not
+        // lower it. For a clearly well-controlled history the opposite holds: a looser floor / faster
+        // slew is the low-risk direction, so this scales below neutral. This is shadow-only logging
+        // (no dosing effect) either way, so neither direction carries the live-dosing risk that keeps
+        // Aggression/HypoCaution one-directional.
+        val floorSlewAggressiveness = round1(
+            when {
+                hypoProne      -> 130.0
+                wellControlled -> 75.0
+                else           -> 100.0
+            }
+        )
+        run {
+            val why = "Floor/slew aggressiveness $floorSlewAggressiveness% (${
+                when {
+                    hypoProne      -> "stricter floor — hypo history"
+                    wellControlled -> "looser floor — well-controlled history"
+                    else            -> "neutral"
+                }
+            }; shadow-only, refines after review)"
+            reasons += why
+            rationaleByKey[DoubleKey.ApsBoostFloorSlewAggressiveness] = why
+        }
 
         return V5Suggestion(
             aggression = aggression, hypoCaution = hypoCaution,
@@ -195,7 +264,9 @@ object BoostV5AutoConfig {
             velocityBudgetFloor = velocityBudgetFloor,
             primerCapU = primerCapU,
             primerTbrFallback = primerTbrFallback,
-            rationale = reasons
+            floorSlewAggressiveness = floorSlewAggressiveness,
+            rationale = reasons,
+            rationaleByKey = rationaleByKey
         )
     }
 
