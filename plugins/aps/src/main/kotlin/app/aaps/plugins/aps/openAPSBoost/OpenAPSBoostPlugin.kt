@@ -326,6 +326,9 @@ open class OpenAPSBoostPlugin @Inject constructor(
     private val postExerciseRecoveryHours; get() = preferences.getBoostDosing(DoubleKey.ApsBoostPostExerciseRecoveryHours)
     private val postExerciseRecoveryTarget; get() = profileUtil.convertToMgdlDetect(preferences.getBoostDosing(UnitDoubleKey.ApsBoostPostExerciseRecoveryTarget, profileUtil))
     private val postExerciseRecoveryScale; get() = preferences.getBoostDosing(DoubleKey.ApsBoostPostExerciseRecoveryScale)
+    // Konzept 1 (2026-08-26) — see BoostFloorSlewShadow.kt.
+    private val floorSlewShadowEnabled; get() = preferences.getBoostDosing(BooleanKey.ApsBoostFloorSlewShadowEnabled)
+    private val floorSlewAggressiveness; get() = preferences.getBoostDosing(DoubleKey.ApsBoostFloorSlewAggressiveness)
     private val postExerciseMinDuration; get() = preferences.getBoostDosing(IntKey.ApsBoostPostExerciseMinDuration)
 
     // ---- Feed-health edge detection (F4/F6, 2026-07-07) ----
@@ -1118,6 +1121,45 @@ open class OpenAPSBoostPlugin @Inject constructor(
         // Publish the step-based sleep-in state for next cycle's night-mode evaluation. (2026-07-02)
         sleepInActiveCached = activityResult.sleepInActive
 
+        // 0. Floor/slew shadow (Konzept 1, 2026-08-26) — rolling ISF-floor/slew-limiter ESTIMATE,
+        // log-only, never touches oapsProfile/dosing. The expensive part (DB query over up to 14
+        // days) only runs at most every 30min; the resulting suggestion is CACHED and re-logged
+        // every cycle in between, so every NS reason string in a 30-min block carries the current
+        // standing estimate, not just the one cycle that happened to recompute it. See
+        // BoostFloorSlewShadow.kt for the full design rationale.
+        if (floorSlewShadowEnabled && now - lastFloorSlewComputeMs >= floorSlewRecomputeIntervalMs) {
+            lastFloorSlewComputeMs = now
+            try {
+                val shortSince = now - 2 * 24 * 3600_000L
+                val longSince = now - 14 * 24 * 3600_000L
+                val longResults = persistenceLayer.getApsResults(longSince, now)
+                val samples = longResults.mapNotNull { r ->
+                    val vs = r.variableSens
+                    val profileSens = r.oapsProfileBoost?.sens
+                    if (vs == null || profileSens == null || profileSens <= 0.0) null
+                    else BoostFloorSlewShadow.CycleSample(r.date, vs / profileSens)
+                }
+                val shortSamples = samples.filter { it.timestampMs >= shortSince }
+                floorSlewSuggestionCached = BoostFloorSlewShadow.computeSuggestion(shortSamples, samples, floorSlewAggressiveness)
+                if (floorSlewSuggestionCached == null) {
+                    aapsLogger.debug(LTag.APS, "Floor/slew shadow (Konzept 1): not enough samples yet (${samples.size}/${BoostFloorSlewShadow.MIN_SAMPLES_FOR_ESTIMATE} needed)")
+                }
+            } catch (t: Throwable) {
+                aapsLogger.error(LTag.APS, "Floor/slew shadow (Konzept 1): compute failed (non-fatal)", t)
+                floorSlewSuggestionCached = null
+            }
+        }
+        val floorSlewNsNote: String? = if (floorSlewShadowEnabled) {
+            floorSlewSuggestionCached?.let { s ->
+                aapsLogger.debug(
+                    LTag.APS,
+                    "Floor/slew shadow (Konzept 1): floor=${s.floorPct}% slew=${Round.roundTo(s.slewPctPerCycle, 0.1)}%/cycle " +
+                        "(from ${s.longWindowSamples} samples/14d, ${s.shortWindowSamples} samples/2d, aggressiveness=${floorSlewAggressiveness}%) — logged only, not applied"
+                )
+                "floorSlewShadow: floor=${s.floorPct}% slew=${Round.roundTo(s.slewPctPerCycle, 0.1)}%/cycle samples=${s.longWindowSamples}; "
+            }
+        } else null
+
         // 1a. Exercise-detection shadow (Konzept 8, 2026-08-26) — Health Connect ExerciseSessionRecord,
         // any type, log-only, never touches activityResult/TT/dosing. Real incident this targets:
         // cycling not caught by the HR+steps detector above, real hypo, had to drink against it. For
@@ -1758,6 +1800,7 @@ open class OpenAPSBoostPlugin @Inject constructor(
             if (exerciseShadowNsNotes.isNotEmpty()) it.reason.append(exerciseShadowNsNotes)
             if (postExerciseShadowNsNotes.isNotEmpty()) it.reason.append(postExerciseShadowNsNotes)
             v6PreMealShadowNsNote?.let { note -> it.reason.append(note) }
+            floorSlewNsNote?.let { note -> it.reason.append(note) }
 
             // ISF shadow telemetry — V1's actual variable_sens used the instantaneous
             // ratio = tdd24/tdd7; V4.4.2 would use an EMA(τ=3h) of the same. Compute
@@ -2574,6 +2617,13 @@ open class OpenAPSBoostPlugin @Inject constructor(
     @Volatile private var lastNightModeRun: Long = 0
     @Volatile private var lastNightModeResult: Boolean = false
 
+    // ---- Konzept 1 floor/slew shadow (2026-08-26) ----
+    // Throttle: recomputing needs an APSResult DB query over up to 14 days, too heavy for every
+    // 5-min cycle. Recomputed at most once per this interval; cheap to read cached in between.
+    @Volatile private var lastFloorSlewComputeMs: Long = 0L
+    @Volatile private var floorSlewSuggestionCached: BoostFloorSlewShadow.Suggestion? = null
+    private val floorSlewRecomputeIntervalMs = 30 * 60_000L
+
     // ---- Sleep state (2026-06-02) ----
     // Updated at end of invoke() once HR + steps + mlMealLikely are known. Read by
     // isNightModeActiveImpl() when ApsBoostNightModeAutoBySleep is enabled.
@@ -2714,6 +2764,7 @@ open class OpenAPSBoostPlugin @Inject constructor(
             requiredKey != "absorption_smb_advanced" &&
             requiredKey != "boost_default_aaps_settings" &&
             requiredKey != "boost_dynisf_settings" &&
+            requiredKey != "boost_floor_slew_shadow_settings" &&
             requiredKey != "boost_exercise_settings" &&
             requiredKey != "boost_stepcount_settings" &&
             requiredKey != "boost_hr_integration_settings" &&
@@ -2789,6 +2840,15 @@ open class OpenAPSBoostPlugin @Inject constructor(
                 addPreference(AdaptiveDoublePreference(ctx = context, doubleKey = DoubleKey.ApsBoostDynIsfVelocity, dialogMessage = R.string.boost_dynisf_velocity_summary, title = R.string.boost_dynisf_velocity_title))
                 addPreference(AdaptiveUnitPreference(ctx = context, unitKey = UnitDoubleKey.ApsBoostDynIsfBgCap, dialogMessage = R.string.boost_dynisf_bg_cap_summary, title = R.string.boost_dynisf_bg_cap_title))
                 addPreference(AdaptiveIntPreference(ctx = context, intKey = IntKey.ApsBoostDynIsfAdjustmentFactor, dialogMessage = R.string.boost_dynisf_adjust_factor_summary, title = R.string.boost_dynisf_adjust_factor_title))
+            })
+
+            // ── 3b. Floor/Slew Shadow (Konzept 1, 2026-08-26) ────────────
+            addPreference(preferenceManager.createPreferenceScreen(context).apply {
+                key = "boost_floor_slew_shadow_settings"
+                title = rh.gs(R.string.boost_floor_slew_shadow_title)
+                summary = rh.gs(R.string.boost_floor_slew_shadow_summary)
+                addPreference(AdaptiveSwitchPreference(ctx = context, booleanKey = BooleanKey.ApsBoostFloorSlewShadowEnabled, summary = R.string.boost_floor_slew_shadow_enabled_summary, title = R.string.boost_floor_slew_shadow_enabled_title))
+                addPreference(AdaptiveDoublePreference(ctx = context, doubleKey = DoubleKey.ApsBoostFloorSlewAggressiveness, dialogMessage = R.string.boost_floor_slew_aggressiveness_summary, title = R.string.boost_floor_slew_aggressiveness_title))
             })
 
             // ── 4. Exercise Settings (parent with nested sub-screens) ────

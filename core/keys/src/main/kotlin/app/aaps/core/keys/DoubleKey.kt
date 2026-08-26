@@ -64,6 +64,9 @@ enum class DoubleKey(
     ApsBoostActivityPct("boost_activity_pct", 80.0, 30.0, 150.0, defaultedBySM = true),
     ApsBoostPostExerciseRecoveryHours("boost_post_exercise_recovery_hours", 2.0, 0.5, 8.0, defaultedBySM = true),
     ApsBoostPostExerciseRecoveryScale("boost_post_exercise_recovery_scale", 0.5, 0.0, 1.0, defaultedBySM = true),
+    // Konzept 1 (2026-08-26) — scales the rolling floor/slew estimate stronger or weaker than the
+    // raw computed values. 100 = unscaled. See BoostFloorSlewShadow.kt.
+    ApsBoostFloorSlewAggressiveness("boost_floor_slew_aggressiveness", 100.0, 50.0, 150.0, defaultedBySM = true),
     // Default is permissive (10 = the max, effectively off) on purpose: auto-config LOWERS it to the
     // per-user value on first V6 activation; until then a conservative default would needlessly throttle.
     ApsBoostCumulativeSmbCap60Min("boost_cumulative_smb_cap_60min", 10.0, 0.0, 10.0, defaultedBySM = true),
