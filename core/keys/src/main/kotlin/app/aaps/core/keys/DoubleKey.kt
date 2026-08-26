@@ -64,6 +64,25 @@ enum class DoubleKey(
     ApsBoostActivityPct("boost_activity_pct", 80.0, 30.0, 150.0, defaultedBySM = true),
     ApsBoostPostExerciseRecoveryHours("boost_post_exercise_recovery_hours", 2.0, 0.5, 8.0, defaultedBySM = true),
     ApsBoostPostExerciseRecoveryScale("boost_post_exercise_recovery_scale", 0.5, 0.0, 1.0, defaultedBySM = true),
+    // Per-exercise-type multipliers on top of the two settings above (2026-08-26) — were hardcoded
+    // constants until now; defaults below reproduce the exact prior behaviour, only now inspectable
+    // and adjustable per user instead of buried in code. Used by BOTH the live post-exercise-recovery
+    // mechanism and Konzept 8's exercise-detection shadow (same table, see OpenAPSBoostPlugin.kt).
+    ApsBoostExerciseVigorousWindowMult("boost_exercise_vigorous_window_mult", 1.25, 0.5, 2.0, defaultedBySM = true),
+    ApsBoostExerciseVigorousScaleMult("boost_exercise_vigorous_scale_mult", 0.8, 0.3, 1.5, defaultedBySM = true),
+    ApsBoostExerciseResistanceWindowMult("boost_exercise_resistance_window_mult", 1.5, 0.5, 2.0, defaultedBySM = true),
+    ApsBoostExerciseResistanceTargetOffset("boost_exercise_resistance_target_offset", 10.0, 0.0, 30.0, defaultedBySM = true),
+    ApsBoostExerciseResistanceScaleMult("boost_exercise_resistance_scale_mult", 1.2, 0.5, 2.0, defaultedBySM = true),
+    ApsBoostExerciseLightWindowMult("boost_exercise_light_window_mult", 0.5, 0.2, 1.5, defaultedBySM = true),
+    ApsBoostExerciseLightScaleMult("boost_exercise_light_scale_mult", 1.4, 0.5, 2.0, defaultedBySM = true),
+    // Konzept 6 Alcohol shadow (2026-08-26) — were hardcoded constants, now user-adjustable. Defaults
+    // reproduce prior behaviour exactly; damping levels originally taken from AIMI's own established
+    // range (see AlcoholShadow.kt). Bounded ≤1.0 — a value above 1.0 would INCREASE insulin during
+    // alcohol, the opposite of this feature's entire purpose.
+    ApsBoostAlcoholLightMultiplier("boost_alcohol_light_multiplier", 0.85, 0.5, 1.0, defaultedBySM = true),
+    ApsBoostAlcoholModerateMultiplier("boost_alcohol_moderate_multiplier", 0.65, 0.3, 1.0, defaultedBySM = true),
+    ApsBoostAlcoholHighMultiplier("boost_alcohol_high_multiplier", 0.50, 0.2, 1.0, defaultedBySM = true),
+    ApsBoostAlcoholLowIobThreshold("boost_alcohol_low_iob_threshold", 1.0, 0.2, 3.0, defaultedBySM = true),
     // Konzept 1 (2026-08-26) — scales the rolling floor/slew estimate stronger or weaker than the
     // raw computed values. 100 = unscaled. See BoostFloorSlewShadow.kt.
     ApsBoostFloorSlewAggressiveness("boost_floor_slew_aggressiveness", 100.0, 50.0, 150.0, defaultedBySM = true),

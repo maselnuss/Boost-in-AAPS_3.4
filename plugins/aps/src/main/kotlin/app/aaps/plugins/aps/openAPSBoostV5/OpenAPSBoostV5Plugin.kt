@@ -734,6 +734,13 @@ open class OpenAPSBoostV5Plugin @Inject constructor(
                 summary = rh.gs(R.string.boost_meal_alcohol_buttons_summary)
                 addPreference(AdaptiveSwitchPreference(ctx = context, booleanKey = BooleanKey.ApsBoostShowMealButton, summary = R.string.boost_show_meal_button_summary, title = R.string.boost_show_meal_button_title))
                 addPreference(AdaptiveSwitchPreference(ctx = context, booleanKey = BooleanKey.ApsBoostShowAlcoholButton, summary = R.string.boost_show_alcohol_button_summary, title = R.string.boost_show_alcohol_button_title))
+                // Alcohol damping calibration (2026-08-26) — were hardcoded constants in
+                // AlcoholShadow.kt, now user-adjustable. Defaults reproduce prior behaviour exactly.
+                addPreference(AdaptiveDoublePreference(ctx = context, doubleKey = DoubleKey.ApsBoostAlcoholLightMultiplier, dialogMessage = R.string.boost_alcohol_light_multiplier_summary, title = R.string.boost_alcohol_light_multiplier_title))
+                addPreference(AdaptiveDoublePreference(ctx = context, doubleKey = DoubleKey.ApsBoostAlcoholModerateMultiplier, dialogMessage = R.string.boost_alcohol_moderate_multiplier_summary, title = R.string.boost_alcohol_moderate_multiplier_title))
+                addPreference(AdaptiveDoublePreference(ctx = context, doubleKey = DoubleKey.ApsBoostAlcoholHighMultiplier, dialogMessage = R.string.boost_alcohol_high_multiplier_summary, title = R.string.boost_alcohol_high_multiplier_title))
+                addPreference(AdaptiveUnitPreference(ctx = context, unitKey = UnitDoubleKey.ApsBoostAlcoholHyperBrakeThreshold, dialogMessage = R.string.boost_alcohol_hyper_brake_threshold_summary, title = R.string.boost_alcohol_hyper_brake_threshold_title))
+                addPreference(AdaptiveDoublePreference(ctx = context, doubleKey = DoubleKey.ApsBoostAlcoholLowIobThreshold, dialogMessage = R.string.boost_alcohol_low_iob_threshold_summary, title = R.string.boost_alcohol_low_iob_threshold_title))
             })
         }
         // Shared engine settings nested under Advanced. includeEngineEssentials = false: the

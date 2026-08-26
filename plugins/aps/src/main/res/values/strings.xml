@@ -208,6 +208,16 @@
     <string name="boost_show_meal_button_summary">Tap the moment you start eating — immediately sets the pre-meal target above and trains MealTimeLearner, independent of any learned time window. Shadow-first: no dosing change until validated.</string>
     <string name="boost_show_alcohol_button_title">Show ALC button</string>
     <string name="boost_show_alcohol_button_summary">Tap as soon as you start drinking anything alcoholic, including mixed/diluted drinks like Radler or Aperol Spritz. Gradually dampens SMB to guard against delayed post-alcohol hypoglycemia (impaired liver counter-regulation). Starts light, escalates automatically on repeated BG waves or another tap; ends on its own once BG has been stable for a while (2–8h). Shadow-first: no dosing change until validated.</string>
+    <string name="boost_alcohol_light_multiplier_title">Light Intensity — SMB Multiplier</string>
+    <string name="boost_alcohol_light_multiplier_summary">SMB multiplier at LIGHT intensity (first tap). Default 0.85 (15% reduction). Lower = stronger protection. Must stay ≤1.0 — a higher value would increase insulin during alcohol, the opposite of this feature's purpose.</string>
+    <string name="boost_alcohol_moderate_multiplier_title">Moderate Intensity — SMB Multiplier</string>
+    <string name="boost_alcohol_moderate_multiplier_summary">SMB multiplier at MODERATE intensity (after escalation — repeated BG waves or a second tap). Default 0.65 (35% reduction). Lower = stronger protection.</string>
+    <string name="boost_alcohol_high_multiplier_title">High Intensity — SMB Multiplier</string>
+    <string name="boost_alcohol_high_multiplier_summary">SMB multiplier at HIGH intensity (the escalation ceiling). Default 0.50 (50% reduction). Lower = stronger protection.</string>
+    <string name="boost_alcohol_hyper_brake_threshold_title">Hyper-Brake Threshold</string>
+    <string name="boost_alcohol_hyper_brake_threshold_summary">BG at or above this fully suspends alcohol damping for the cycle (back to normal dosing) — prioritises correcting a genuine high over the delayed-hypo protection. Default 180 mg/dL, derived from real documented incident peaks.</string>
+    <string name="boost_alcohol_low_iob_threshold_title">Low-IOB End Threshold (U)</string>
+    <string name="boost_alcohol_low_iob_threshold_summary">Protection can only end (after the minimum duration, once BG is stable) once IOB drops below this. Default 1.0U, derived from a real documented incident where 1.85U IOB was still active during a crash.</string>
 
     <string name="boost_post_exercise_recovery_title">Post-Exercise Recovery</string>
     <string name="boost_post_exercise_recovery_enabled_title">Enable Post-Exercise Recovery</string>
@@ -220,6 +230,20 @@
     <string name="boost_post_exercise_recovery_scale_summary">Multiplier (0.0–1.0) applied to boost_bolus and boost_scale during the recovery window. 0.5 = 50% reduction. Applies even if TempTarget is cancelled manually.</string>
     <string name="boost_post_exercise_min_duration_title">Minimum Exercise Duration (min)</string>
     <string name="boost_post_exercise_min_duration_summary">Recovery only triggers if exercise was detected for at least this many minutes. Avoids false triggers from brief activity bursts. Default: 10 min.</string>
+    <string name="boost_exercise_vigorous_window_mult_title">Vigorous Aerobic — Window Multiplier</string>
+    <string name="boost_exercise_vigorous_window_mult_summary">Multiplies the base recovery window (above) for vigorous cardio (running, biking, HIIT, swimming, …) — high immediate hypo risk warrants a longer window. Default 1.25×.</string>
+    <string name="boost_exercise_vigorous_scale_mult_title">Vigorous Aerobic — SMB Reduction Multiplier</string>
+    <string name="boost_exercise_vigorous_scale_mult_summary">Multiplies the base SMB Reduction Factor (above) for vigorous cardio — more suppression than the baseline. Default 0.8× (stronger suppression).</string>
+    <string name="boost_exercise_resistance_window_mult_title">Resistance — Window Multiplier</string>
+    <string name="boost_exercise_resistance_window_mult_summary">Multiplies the base recovery window for resistance/strength training — delayed hypo risk warrants the longest window. Default 1.5×.</string>
+    <string name="boost_exercise_resistance_target_offset_title">Resistance — Target Offset (mg/dL)</string>
+    <string name="boost_exercise_resistance_target_offset_summary">Added to the base recovery target for resistance training — BG often runs high initially after lifting, so the target starts slightly higher. Default +10 mg/dL.</string>
+    <string name="boost_exercise_resistance_scale_mult_title">Resistance — SMB Reduction Multiplier</string>
+    <string name="boost_exercise_resistance_scale_mult_summary">Multiplies the base SMB Reduction Factor for resistance training — less suppression than the baseline (BG tends to rise, not fall, right after). Default 1.2× (weaker suppression).</string>
+    <string name="boost_exercise_light_window_mult_title">Light Aerobic — Window Multiplier</string>
+    <string name="boost_exercise_light_window_mult_summary">Multiplies the base recovery window for light aerobic activity — minimal glycogen depletion warrants a shorter window. Default 0.5×.</string>
+    <string name="boost_exercise_light_scale_mult_title">Light Aerobic — SMB Reduction Multiplier</string>
+    <string name="boost_exercise_light_scale_mult_summary">Multiplies the base SMB Reduction Factor for light aerobic activity — less suppression than the baseline. Default 1.4× (weaker suppression).</string>
     <string name="boost_post_exercise_recovery_active">Post-exercise recovery active — SMB aggressiveness reduced</string>
 
     <!-- Boost Heart Rate Integration -->

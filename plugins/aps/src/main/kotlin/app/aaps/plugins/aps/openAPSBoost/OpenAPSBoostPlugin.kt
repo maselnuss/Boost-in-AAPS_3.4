@@ -326,6 +326,20 @@ open class OpenAPSBoostPlugin @Inject constructor(
     private val postExerciseRecoveryHours; get() = preferences.getBoostDosing(DoubleKey.ApsBoostPostExerciseRecoveryHours)
     private val postExerciseRecoveryTarget; get() = profileUtil.convertToMgdlDetect(preferences.getBoostDosing(UnitDoubleKey.ApsBoostPostExerciseRecoveryTarget, profileUtil))
     private val postExerciseRecoveryScale; get() = preferences.getBoostDosing(DoubleKey.ApsBoostPostExerciseRecoveryScale)
+    // Per-exercise-type multipliers (2026-08-26) — were hardcoded, now user-adjustable. See DoubleKey.kt.
+    private val exerciseVigorousWindowMult; get() = preferences.getBoostDosing(DoubleKey.ApsBoostExerciseVigorousWindowMult)
+    private val exerciseVigorousScaleMult; get() = preferences.getBoostDosing(DoubleKey.ApsBoostExerciseVigorousScaleMult)
+    private val exerciseResistanceWindowMult; get() = preferences.getBoostDosing(DoubleKey.ApsBoostExerciseResistanceWindowMult)
+    private val exerciseResistanceTargetOffset; get() = preferences.getBoostDosing(DoubleKey.ApsBoostExerciseResistanceTargetOffset)
+    private val exerciseResistanceScaleMult; get() = preferences.getBoostDosing(DoubleKey.ApsBoostExerciseResistanceScaleMult)
+    private val exerciseLightWindowMult; get() = preferences.getBoostDosing(DoubleKey.ApsBoostExerciseLightWindowMult)
+    private val exerciseLightScaleMult; get() = preferences.getBoostDosing(DoubleKey.ApsBoostExerciseLightScaleMult)
+    // Konzept 6 Alcohol shadow (2026-08-26) — were hardcoded, now user-adjustable. See AlcoholShadow.kt.
+    private val alcoholLightMultiplier; get() = preferences.getBoostDosing(DoubleKey.ApsBoostAlcoholLightMultiplier)
+    private val alcoholModerateMultiplier; get() = preferences.getBoostDosing(DoubleKey.ApsBoostAlcoholModerateMultiplier)
+    private val alcoholHighMultiplier; get() = preferences.getBoostDosing(DoubleKey.ApsBoostAlcoholHighMultiplier)
+    private val alcoholLowIobThreshold; get() = preferences.getBoostDosing(DoubleKey.ApsBoostAlcoholLowIobThreshold)
+    private val alcoholHyperBrakeThreshold; get() = profileUtil.convertToMgdlDetect(preferences.getBoostDosing(UnitDoubleKey.ApsBoostAlcoholHyperBrakeThreshold, profileUtil))
     // Konzept 1 (2026-08-26) — see BoostFloorSlewShadow.kt.
     private val floorSlewShadowEnabled; get() = preferences.getBoostDosing(BooleanKey.ApsBoostFloorSlewShadowEnabled)
     private val floorSlewAggressiveness; get() = preferences.getBoostDosing(DoubleKey.ApsBoostFloorSlewAggressiveness)
@@ -1192,8 +1206,8 @@ open class OpenAPSBoostPlugin @Inject constructor(
                 // (1b) — MODERATE_AEROBIC has no dedicated row there either, so it (like anything
                 // else unrecognised) falls to the same else/default the real code uses.
                 val (windowMultiplier, targetOffsetMgdl, scaleMultiplier) = when (tier) {
-                    "VIGOROUS_AEROBIC" -> Triple(1.25, 0.0, 0.8)
-                    "RESISTANCE" -> Triple(1.5, 10.0, 1.2)
+                    "VIGOROUS_AEROBIC" -> Triple(exerciseVigorousWindowMult, 0.0, exerciseVigorousScaleMult)
+                    "RESISTANCE" -> Triple(exerciseResistanceWindowMult, exerciseResistanceTargetOffset, exerciseResistanceScaleMult)
                     else -> Triple(1.0, 0.0, 1.0)
                 }
                 val fixedWindowMin = (postExerciseRecoveryHours * 60.0 * windowMultiplier).toInt()
@@ -1240,10 +1254,10 @@ open class OpenAPSBoostPlugin @Inject constructor(
                     //   LIGHT_AEROBIC     — minimal glycogen depletion: shorter window, less suppression
                     //   ACTIVE/MODERATE   — baseline (no multiplier)
                     val (windowMultiplier, targetOffsetMgdl, scaleMultiplier) = when (lastExerciseStateAtTransition) {
-                        "VIGOROUS_AEROBIC" -> Triple(1.25, 0.0,  0.8)
-                        "RESISTANCE"       -> Triple(1.5,  10.0, 1.2)
-                        "LIGHT_AEROBIC"    -> Triple(0.5,  0.0,  1.4)
-                        else               -> Triple(1.0,  0.0,  1.0)
+                        "VIGOROUS_AEROBIC" -> Triple(exerciseVigorousWindowMult, 0.0, exerciseVigorousScaleMult)
+                        "RESISTANCE"       -> Triple(exerciseResistanceWindowMult, exerciseResistanceTargetOffset, exerciseResistanceScaleMult)
+                        "LIGHT_AEROBIC"    -> Triple(exerciseLightWindowMult, 0.0, exerciseLightScaleMult)
+                        else               -> Triple(1.0, 0.0, 1.0)
                     }
                     val recoveryMillis = (postExerciseRecoveryHours * 3600_000L * windowMultiplier).toLong()
                     val recoveryTargetMgdl = postExerciseRecoveryTarget + targetOffsetMgdl
@@ -1550,7 +1564,7 @@ open class OpenAPSBoostPlugin @Inject constructor(
             val bgStable = AlcoholShadow.isBgStable(bgLastStabilityWindow)
             val currentIob = iobArray.getOrNull(0)?.iob ?: 999.0   // fail closed: unknown IOB never counts as "low"
 
-            if (AlcoholShadow.protectionShouldEnd(elapsedMin, bgStable, currentIob)) {
+            if (AlcoholShadow.protectionShouldEnd(elapsedMin, bgStable, currentIob, alcoholLowIobThreshold)) {
                 aapsLogger.debug(LTag.APS, "Alcohol protection: ended after ${elapsedMin}min (bgStable=$bgStable, iob=$currentIob)")
                 alcoholProtectionStartMs = 0L
                 preferences.put(LongNonKey.ApsBoostAlcoholProtectionStartMs, 0L)
@@ -1562,7 +1576,13 @@ open class OpenAPSBoostPlugin @Inject constructor(
             preferences.put(LongNonKey.ApsBoostAlcoholProtectionStartMs, alcoholProtectionStartMs)
             preferences.put(StringNonKey.ApsBoostAlcoholIntensityDisplay, alcoholIntensity.name)
 
-            alcoholShadowMultiplier = AlcoholShadow.effectiveSmbMultiplier(alcoholIntensity, glucoseStatus.glucose)
+            alcoholShadowMultiplier = AlcoholShadow.effectiveSmbMultiplier(
+                alcoholIntensity, glucoseStatus.glucose,
+                lightMultiplier = alcoholLightMultiplier,
+                moderateMultiplier = alcoholModerateMultiplier,
+                highMultiplier = alcoholHighMultiplier,
+                hyperBrakeThresholdMgdl = alcoholHyperBrakeThreshold
+            )
             alcoholShadowActive = true
         }
 
@@ -2893,6 +2913,16 @@ open class OpenAPSBoostPlugin @Inject constructor(
                     addPreference(AdaptiveUnitPreference(ctx = context, unitKey = UnitDoubleKey.ApsBoostPostExerciseRecoveryTarget, dialogMessage = R.string.boost_post_exercise_recovery_target_summary, title = R.string.boost_post_exercise_recovery_target_title))
                     addPreference(AdaptiveDoublePreference(ctx = context, doubleKey = DoubleKey.ApsBoostPostExerciseRecoveryScale, dialogMessage = R.string.boost_post_exercise_recovery_scale_summary, title = R.string.boost_post_exercise_recovery_scale_title))
                     addPreference(AdaptiveIntPreference(ctx = context, intKey = IntKey.ApsBoostPostExerciseMinDuration, dialogMessage = R.string.boost_post_exercise_min_duration_summary, title = R.string.boost_post_exercise_min_duration_title))
+                    // Per-exercise-type multipliers (2026-08-26) — were hardcoded constants, now
+                    // adjustable per user. Defaults reproduce prior behaviour exactly. Applies to BOTH
+                    // this live mechanism and Konzept 8's exercise-detection shadow (same table).
+                    addPreference(AdaptiveDoublePreference(ctx = context, doubleKey = DoubleKey.ApsBoostExerciseVigorousWindowMult, dialogMessage = R.string.boost_exercise_vigorous_window_mult_summary, title = R.string.boost_exercise_vigorous_window_mult_title))
+                    addPreference(AdaptiveDoublePreference(ctx = context, doubleKey = DoubleKey.ApsBoostExerciseVigorousScaleMult, dialogMessage = R.string.boost_exercise_vigorous_scale_mult_summary, title = R.string.boost_exercise_vigorous_scale_mult_title))
+                    addPreference(AdaptiveDoublePreference(ctx = context, doubleKey = DoubleKey.ApsBoostExerciseResistanceWindowMult, dialogMessage = R.string.boost_exercise_resistance_window_mult_summary, title = R.string.boost_exercise_resistance_window_mult_title))
+                    addPreference(AdaptiveDoublePreference(ctx = context, doubleKey = DoubleKey.ApsBoostExerciseResistanceTargetOffset, dialogMessage = R.string.boost_exercise_resistance_target_offset_summary, title = R.string.boost_exercise_resistance_target_offset_title))
+                    addPreference(AdaptiveDoublePreference(ctx = context, doubleKey = DoubleKey.ApsBoostExerciseResistanceScaleMult, dialogMessage = R.string.boost_exercise_resistance_scale_mult_summary, title = R.string.boost_exercise_resistance_scale_mult_title))
+                    addPreference(AdaptiveDoublePreference(ctx = context, doubleKey = DoubleKey.ApsBoostExerciseLightWindowMult, dialogMessage = R.string.boost_exercise_light_window_mult_summary, title = R.string.boost_exercise_light_window_mult_title))
+                    addPreference(AdaptiveDoublePreference(ctx = context, doubleKey = DoubleKey.ApsBoostExerciseLightScaleMult, dialogMessage = R.string.boost_exercise_light_scale_mult_summary, title = R.string.boost_exercise_light_scale_mult_title))
                 })
 
                 // 4d. Health Connect (2026-08-26 — moved here from Night Mode: HR ingest was

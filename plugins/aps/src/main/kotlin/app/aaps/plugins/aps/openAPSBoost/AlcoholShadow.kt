@@ -91,9 +91,25 @@ object AlcoholShadow {
         waveCrossings >= WAVE_COUNT_FOR_ESCALATION
 
     /** The SMB multiplier actually in effect THIS cycle — the hyper-brake overrides intensity-based
-     * damping entirely (not partially, back to 1.0 = no damping) once BG reaches the threshold. */
-    fun effectiveSmbMultiplier(intensity: Intensity, currentBg: Double): Double =
-        if (currentBg >= HYPER_BRAKE_THRESHOLD_MGDL) 1.0 else intensity.smbMultiplier
+     * damping entirely (not partially, back to 1.0 = no damping) once BG reaches the threshold.
+     *
+     * The four optional params (2026-08-26) let the caller pass user-configured overrides; each
+     * defaults to the value it always had, so existing callers/tests are unaffected. */
+    fun effectiveSmbMultiplier(
+        intensity: Intensity,
+        currentBg: Double,
+        lightMultiplier: Double = Intensity.LIGHT.smbMultiplier,
+        moderateMultiplier: Double = Intensity.MODERATE.smbMultiplier,
+        highMultiplier: Double = Intensity.HIGH.smbMultiplier,
+        hyperBrakeThresholdMgdl: Double = HYPER_BRAKE_THRESHOLD_MGDL
+    ): Double {
+        if (currentBg >= hyperBrakeThresholdMgdl) return 1.0
+        return when (intensity) {
+            Intensity.LIGHT -> lightMultiplier
+            Intensity.MODERATE -> moderateMultiplier
+            Intensity.HIGH -> highMultiplier
+        }
+    }
 
     /** Is BG calm enough, over the (already time-filtered) [bgInLookbackWindow], to count toward
      * ending protection? Requires at least 2 readings — a single point can't demonstrate stability. */
@@ -107,9 +123,14 @@ object AlcoholShadow {
      * Should alcohol protection end now?
      * @param elapsedMin minutes since the first tap of this protection session.
      */
-    fun protectionShouldEnd(elapsedMin: Long, bgStable: Boolean, iob: Double): Boolean = when {
+    fun protectionShouldEnd(
+        elapsedMin: Long,
+        bgStable: Boolean,
+        iob: Double,
+        lowIobThresholdU: Double = LOW_IOB_THRESHOLD_U
+    ): Boolean = when {
         elapsedMin >= MAX_DURATION_MIN -> true                              // hard ceiling, always wins
         elapsedMin < MIN_DURATION_MIN -> false                              // guaranteed floor
-        else -> bgStable && iob < LOW_IOB_THRESHOLD_U
+        else -> bgStable && iob < lowIobThresholdU
     }
 }

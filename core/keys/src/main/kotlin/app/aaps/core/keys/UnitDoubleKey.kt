@@ -30,4 +30,7 @@ enum class UnitDoubleKey(
     ApsBoostDynIsfNormalTarget("boost_dynisf_normal_target", 99.0, 70, 120, defaultedBySM = true),
     ApsBoostNightModeBgOffset("boost_night_mode_bg_offset", 27.0, 0, 90, defaultedBySM = true),
     ApsBoostPostExerciseRecoveryTarget("boost_post_exercise_recovery_target", 144.0, 90, 200, defaultedBySM = true),
+    // Konzept 6 Alcohol shadow (2026-08-26) — was a hardcoded constant, now user-adjustable. Default
+    // reproduces prior behaviour exactly; derived from real documented incident peaks (see AlcoholShadow.kt).
+    ApsBoostAlcoholHyperBrakeThreshold("boost_alcohol_hyper_brake_threshold", 180.0, 120, 250, defaultedBySM = true),
 }
