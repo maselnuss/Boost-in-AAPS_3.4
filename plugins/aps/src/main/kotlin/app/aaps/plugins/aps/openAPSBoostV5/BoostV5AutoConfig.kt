@@ -25,14 +25,9 @@ import kotlin.math.min
  */
 object BoostV5AutoConfig {
 
-    // ⚠️ TEMP-TEST-ONLY (2026-08-26) — lowered from 7/1500 to let the Konzept-7 review path run on
-    // a fresh emulator with only ~19h of history, purely to verify notification/dialog/apply
-    // MECHANICS (not suggestion quality — a real week of data is needed for that). MUST be reverted
-    // to MIN_DAYS=7 / MIN_BG_READINGS=1500 before any build that goes on the real phone: these also
-    // gate the ORIGINAL one-shot AutoConfig, and running it on statistically thin data would derive
-    // nonsense LIVE dosing knobs (Aggression, caps, ...) for real insulin delivery.
-    const val MIN_DAYS = 0
-    const val MIN_BG_READINGS = 100
+    // Minimum data before we'll auto-configure at all (else leave factory defaults).
+    const val MIN_DAYS = 7
+    const val MIN_BG_READINGS = 1500          // ~7 days of 5-min CGM minus gaps
 
     // Glycaemic thresholds that trigger extra caution (international consensus targets).
     private const val TBR70_TARGET = 4.0      // % time <70 mg/dL
