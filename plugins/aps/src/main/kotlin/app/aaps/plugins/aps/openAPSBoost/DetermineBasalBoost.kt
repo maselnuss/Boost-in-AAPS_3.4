@@ -558,8 +558,17 @@ class DetermineBasalBoost @Inject constructor(
         // =====================================================================
         // RT object initialization
         // =====================================================================
+        // 2026-08-26: was Algorithm.SMB — looks like a leftover from forking off
+        // OpenAPSSMBPlugin's determine_basal(), never updated for Boost's own main-path
+        // RT (the early-bailout RT above, at this function's top, already correctly used
+        // BOOST). Real, pre-existing consequence: APSResultExtension's DB-save/-load
+        // converter switches on `algorithm` to pick which profile field to (de)serialize
+        // — SMB serializes `oapsProfile`, BOOST serializes `oapsProfileBoost`. Every
+        // persisted Boost cycle's profileJson was therefore empty (the wrong, unset field
+        // got serialized), discovered while building the Konzept 1 floor/slew shadow,
+        // which reads oapsProfileBoost back out of history and found nothing to read.
         rT = RT(
-            algorithm = APSResult.Algorithm.SMB,
+            algorithm = APSResult.Algorithm.BOOST,
             runningDynamicIsf = true,
             timestamp = currentTime,
             bg = bg,
