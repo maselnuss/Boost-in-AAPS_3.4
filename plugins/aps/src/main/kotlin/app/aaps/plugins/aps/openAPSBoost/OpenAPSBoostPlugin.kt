@@ -1127,6 +1127,15 @@ open class OpenAPSBoostPlugin @Inject constructor(
         // live mechanism's own fixed-window formula, since Konzept 8 hasn't gone live at all yet —
         // no reason to build it on the flawed formula from day one. Never actually applied here,
         // purely a hypothetical for evaluation.
+        //
+        // NS-visible condensed notes (2026-08-26) — this whole "1a/1b" section runs BEFORE
+        // determine_basal()/the rT result object exists (see .also{it->} far below), so shadow
+        // findings here are collected into local StringBuilders and appended to it.reason once that
+        // object exists — otherwise they'd only ever live in on-device logcat, useless for
+        // evaluating these concepts remotely over the coming weeks.
+        val exerciseShadowNsNotes = StringBuilder()
+        val postExerciseShadowNsNotes = StringBuilder()
+        var v6PreMealShadowNsNote: String? = null
         for (session in healthConnectExerciseIngest.recentSessions) {
             if (!ExerciseShadow.isCurrentlyRelevant(session, now)) continue
             if (!loggedExerciseSessionEndMs.add(session.endMs)) continue   // already logged this session
@@ -1164,6 +1173,7 @@ open class OpenAPSBoostPlugin @Inject constructor(
                     "ended ${minutesAgo}min ago; existing HR+steps detector this cycle: activityState=${activityResult.activityState} " +
                     "(${if (hrCaughtItToo) "also caught it" else "MISSED"}); $consequenceNote — logged only, no effect on TT/dosing"
             )
+            exerciseShadowNsNotes.append("exerciseShadow: type=${session.exerciseType} tier=${tier ?: "unmapped"} durMin=$sessionDurationMin hrCaught=$hrCaughtItToo; ")
         }
         loggedExerciseSessionEndMs.removeIf { now - it > ExerciseShadow.RELEVANT_AFTER_END_MIN * 60_000L }
 
@@ -1205,6 +1215,7 @@ open class OpenAPSBoostPlugin @Inject constructor(
                     // applied; this only logs what a duration-aware version would have given instead.
                     val shadowWindowMin = PostExerciseRecoveryShadow.durationScaledWindowMin(exerciseDurationMin, (recoveryMillis / 60_000L).toInt())
                     aapsLogger.debug(LTag.APS, "Boost post-exercise SHADOW proposal: duration-scaled window would be ${shadowWindowMin}min (actual exercise duration ${exerciseDurationMin}min) vs ${recoveryMillis / 60_000}min actually applied above — not applied, comparison only")
+                    postExerciseShadowNsNotes.append("postExerciseWindowShadow: durationScaled=${shadowWindowMin}min fixedFormula=${recoveryMillis / 60_000}min; ")
                     if (persistenceLayer.getTemporaryTargetActiveAt(now) == null) {
                         val tt = TT(
                             timestamp = now,
@@ -1521,6 +1532,7 @@ open class OpenAPSBoostPlugin @Inject constructor(
             val shadowScale = PostExerciseRecoveryShadow.effectiveScale(activeRecoveryScale, glucoseStatus.glucose)
             if (shadowScale != activeRecoveryScale) {
                 aapsLogger.debug(LTag.APS, "Boost post-exercise SHADOW proposal: hyper-brake would suppress dampening this cycle (BG=${glucoseStatus.glucose} >= ${PostExerciseRecoveryShadow.HYPER_BRAKE_MGDL}) — scale $activeRecoveryScale -> $shadowScale, vs $activeRecoveryScale actually applied below — not applied, comparison only")
+                postExerciseShadowNsNotes.append("postExerciseHyperBrakeShadow: BG=${glucoseStatus.glucose} activeScale=$activeRecoveryScale wouldScale=$shadowScale; ")
             }
         }
 
@@ -1711,6 +1723,10 @@ open class OpenAPSBoostPlugin @Inject constructor(
                 )
             }.onSuccess { shadowRt ->
                 aapsLogger.debug(LTag.APS, "V6 pre-meal dose-comparison (SHADOW, target=${shadowTargetBg.toInt()}): would SMB=${shadowRt.units ?: 0.0}U rate=${shadowRt.rate ?: 0.0}U/h insulinReq=${shadowRt.insulinReq ?: 0.0}U — compare against the real 'Result:' line logged immediately below (same cycle)")
+                // Only the condensed STRING is captured here, never shadowRt itself — shadowRt shares
+                // mutable consoleLog/consoleError references with the singleton ring buffer (see the
+                // big comment above); this local string has no such entanglement and is safe to surface.
+                v6PreMealShadowNsNote = "v6PreMealShadow: target=${shadowTargetBg.toInt()} wouldSMB=${Round.roundTo(shadowRt.units ?: 0.0, 0.01)}U wouldRate=${Round.roundTo(shadowRt.rate ?: 0.0, 0.01)}U/h; "
             }.onFailure { e ->
                 aapsLogger.error(LTag.APS, "V6 pre-meal dose-comparison shadow call failed (non-fatal, real dosing below unaffected)", e)
             }
@@ -1735,6 +1751,14 @@ open class OpenAPSBoostPlugin @Inject constructor(
             recentLowBG45Min = recentLowBG45Min,
             timeSinceLastSmbMin = timeSinceLastSmbMin
         ).also {
+            // NS-visible shadow notes captured earlier in this cycle, BEFORE this rT object existed
+            // (2026-08-26) — exercise-detection (Konzept 8), post-exercise-recovery duration/hyper-
+            // brake proposals, and the V6 pre-meal dose-comparison. Appended here, first thing inside
+            // this block, so they land in it.reason regardless of what happens further down.
+            if (exerciseShadowNsNotes.isNotEmpty()) it.reason.append(exerciseShadowNsNotes)
+            if (postExerciseShadowNsNotes.isNotEmpty()) it.reason.append(postExerciseShadowNsNotes)
+            v6PreMealShadowNsNote?.let { note -> it.reason.append(note) }
+
             // ISF shadow telemetry — V1's actual variable_sens used the instantaneous
             // ratio = tdd24/tdd7; V4.4.2 would use an EMA(τ=3h) of the same. Compute
             // the implied shadow values for direct comparison:
@@ -2470,6 +2494,9 @@ open class OpenAPSBoostPlugin @Inject constructor(
                 val actualUnits = it.units ?: 0.0
                 val suppressedUnits = actualUnits * (1.0 - alcoholShadowMultiplier)
                 aapsLogger.debug(LTag.APS, "Alcohol dose-comparison (SHADOW, intensity=$alcoholIntensity, multiplier=$alcoholShadowMultiplier): actual final SMB=${actualUnits}U → would suppress ${suppressedUnits}U — see the real 'Result:' line immediately below (same cycle, same value)")
+                // NS-visible condensed form (2026-08-26) — see the "NS-visible condensed notes"
+                // comment near the exercise-shadow block above for why.
+                it.reason.append("alcoholShadow: intensity=$alcoholIntensity actualSMB=${Round.roundTo(actualUnits, 0.01)}U wouldSuppressBy=${Round.roundTo(suppressedUnits, 0.01)}U; ")
             }
 
             val determineBasalResult = apsResultProvider.get().with(it)
