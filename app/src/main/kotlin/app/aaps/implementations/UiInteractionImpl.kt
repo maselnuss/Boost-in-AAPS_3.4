@@ -234,6 +234,20 @@ class UiInteractionImpl @Inject constructor(
         )
     }
 
+    override fun addNotificationWithContextAction(id: Int, text: String, level: Int, buttonText: Int, action: (Context) -> Unit, validityCheck: (() -> Boolean)?, @RawRes soundId: Int?, date: Long, validTo: Long) {
+        rxBus.send(
+            EventNewNotification(
+                notificationWithActionProvider.get().with(id = id, text = text, level = level, validityCheck = validityCheck)
+                    .also { n ->
+                        n.action(buttonText) { n.contextForAction?.let(action) }
+                        n.date = date
+                        n.soundId = soundId
+                        n.validTo = validTo
+                    }
+            )
+        )
+    }
+
     override fun addNotification(id: Int, text: String, level: Int, @StringRes actionButtonId: Int, action: Runnable, validityCheck: (() -> Boolean)?) {
         rxBus.send(
             EventNewNotification(

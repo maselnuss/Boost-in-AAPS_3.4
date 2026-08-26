@@ -32,8 +32,11 @@ import app.aaps.core.keys.BooleanComposedKey
 import app.aaps.core.keys.BooleanKey
 import app.aaps.core.keys.DoubleKey
 import app.aaps.core.keys.IntNonKey
+import app.aaps.core.keys.LongNonKey
 import app.aaps.core.keys.UnitDoubleKey
 import app.aaps.core.keys.interfaces.Preferences
+import app.aaps.core.ui.dialogs.AlertDialogHelper
+import com.google.android.material.dialog.MaterialAlertDialogBuilder
 import app.aaps.plugins.aps.getBoostDosing
 import app.aaps.core.validators.preferences.AdaptiveDoublePreference
 import app.aaps.core.validators.preferences.AdaptiveSwitchPreference
@@ -142,11 +145,24 @@ open class OpenAPSBoostV5Plugin @Inject constructor(
      * override the SMB. Selecting plain "Boost" runs the same engine with v5Active=false.
      */
     override fun invoke(initiator: String, tempBasalFallback: Boolean) {
+        val now = dateUtil.now()
+        // Shared, lazily-computed V1Profile: maybeAutoConfigure and maybePeriodicReview each need
+        // it only past their OWN early-return gate (steady state: neither needs it most cycles).
+        // `lazy` means the (fairly heavy — TDD calc + 14d bolus/BG queries) gather runs AT MOST
+        // once per invoke(), shared if both happen to need it the same cycle, and not at all if
+        // neither does — instead of each function pulling its own copy independently.
+        val lazyProfile = lazy { gatherV1Profile(now) }
+
         // First-activation: seed the V5 knobs from the user's own V1 history (before the first dose
         // this cycle, so the engine picks up the values immediately). One-shot, guarded, never
         // overrides a knob the user already tuned.
-        runCatching { maybeAutoConfigure() }
+        runCatching { maybeAutoConfigure { lazyProfile.value } }
             .onFailure { aapsLogger.error(LTag.APS, "BoostV5 auto-config failed (non-fatal)", it) }
+        // Konzept 7 — periodic re-suggestion review. Independent of the one-shot auto-config above:
+        // re-derives EVERY managed knob on an interval and, if anything differs, surfaces a
+        // notification the user can open to review/apply per item. Never writes anything itself.
+        runCatching { maybePeriodicReview(now) { lazyProfile.value } }
+            .onFailure { aapsLogger.error(LTag.APS, "BoostV5 periodic review failed (non-fatal)", it) }
         // Run the shared engine with the V5 override active. lastAPSResult/lastAPSRun delegate to
         // the engine (see above), so the result is exposed the instant runEngine sets it.
         openAPSBoostEngine.get().runEngine(initiator, tempBasalFallback, v5Active = true)
@@ -190,10 +206,21 @@ open class OpenAPSBoostV5Plugin @Inject constructor(
     // A 14-day metric moves slowly, so it is recomputed at most hourly and cached; fail-closed (the
     // floor stays off) until the first successful compute and whenever CGM history is too thin.
     private val TBR_GATE_REFRESH_MS = 60L * 60 * 1000         // hourly
+
+    // Konzept 7 (2026-08-26) — periodic auto-config review interval. 14 days, matching
+    // BoostV5AutoConfig.LOOKBACK_DAYS: the review re-derives from a trailing-14d V1Profile, so a
+    // 14-day cadence means each review's window has fully turned over (zero overlap) with the one
+    // the previous review used — the tightest cadence with no double-counted data.
+    private val PERIODIC_REVIEW_INTERVAL_MS = BoostV5AutoConfig.LOOKBACK_DAYS * 24L * 60 * 60 * 1000
     private val TBR_GATE_MIN_READINGS = 1000                  // ~3.5 days of 5-min CGM before the % is trusted
     @Volatile private var cachedTbrBelow63Pct: Double? = null
     @Volatile private var cachedTbrBelow70Pct: Double? = null
     @Volatile private var lastTbrGateComputeMs: Long = 0L
+
+    // Konzept 7 — set by maybePeriodicReview() (runs in invoke(), before this cycle's rT exists)
+    // when it surfaces a fresh review THIS cycle; consumed+cleared by runShadow() the moment the
+    // live rT becomes available, so the note reaches NS/consoleError exactly once.
+    @Volatile private var pendingPeriodicReviewNsNote: String? = null
 
     /** Throttled trailing-14d time-below-63 AND -70 mg/dL, then the fail-closed floor hypo-gate. */
     internal fun composedFloorTbrAllowed(now: Long): Boolean {
@@ -212,7 +239,52 @@ open class OpenAPSBoostV5Plugin @Inject constructor(
         return composedFloorAllowedByTbr(cachedTbrBelow63Pct, cachedTbrBelow70Pct)
     }
 
-    private fun maybeAutoConfigure() {
+    /** Short, human-readable knob name for log lines / notification text (drops the common prefixes). */
+    private fun shortName(key: DoubleKey) = key.name.removePrefix("ApsBoostV5").removePrefix("ApsBoost")
+
+    /**
+     * Gather the last-[BoostV5AutoConfig.LOOKBACK_DAYS]-day [BoostV5AutoConfig.V1Profile] from the
+     * user's actual dosing + glycaemia history. Shared by [maybeAutoConfigure] (first-activation,
+     * one-shot per knob) and [maybePeriodicReview] (Konzept 7, recurring, re-derives everything) —
+     * both need the identical input gathering, only what they DO with the resulting suggestion
+     * differs.
+     */
+    private fun gatherV1Profile(now: Long): BoostV5AutoConfig.V1Profile {
+        val start = now - BoostV5AutoConfig.LOOKBACK_DAYS * 24L * 60 * 60 * 1000
+
+        // TDD (median over available days) + days-of-data.
+        val tdds = tddCalculator.calculate(BoostV5AutoConfig.LOOKBACK_DAYS, allowMissingDays = true)
+        val tddValues = mutableListOf<Double>()
+        if (tdds != null) for (i in 0 until tdds.size()) {
+            val t = tdds.valueAt(i)
+            val total = if (t.totalAmount > 0) t.totalAmount else t.basalAmount + t.bolusAmount
+            if (total > 0) tddValues.add(total)
+        }
+        val tddMedian = BoostV5AutoConfig.percentile(tddValues, 50.0)
+        val daysWithData = tddValues.size
+
+        // Boluses split into manual (meal) vs SMB.
+        val boluses = persistenceLayer.getBolusesFromTimeToTime(start, now, true)
+        val manual = boluses.filter { it.type == BS.Type.NORMAL && it.amount > 0 }.map { it.amount }
+        val smb = boluses.filter { it.type == BS.Type.SMB && it.amount > 0 }.map { it.amount }
+
+        // Glycaemia (TBR / severe / mean) from CGM.
+        val bgs = persistenceLayer.getBgReadingsDataFromTimeToTime(start, now, true)
+        val n = bgs.size
+        val tbr70 = if (n > 0) 100.0 * bgs.count { it.value >= 1.0 && it.value < 70.0 } / n else 0.0
+        val sev54 = if (n > 0) 100.0 * bgs.count { it.value >= 1.0 && it.value < 54.0 } / n else 0.0
+        val meanBg = if (n > 0) bgs.sumOf { it.value } / n else 0.0
+
+        return BoostV5AutoConfig.V1Profile(
+            daysWithData = daysWithData, bgReadingCount = n, tddMedianU = tddMedian,
+            manualBolusesU = manual, smbAmountsU = smb,
+            tbrBelow70Pct = tbr70, timeBelow54Pct = sev54, meanGlucoseMgdl = meanBg,
+            currentMaxIobU = constraintsChecker.getMaxIOBAllowed().value(),
+            currentMaxBolusU = constraintsChecker.getMaxBolusAllowed().value()
+        )
+    }
+
+    private fun maybeAutoConfigure(profileProvider: () -> BoostV5AutoConfig.V1Profile) {
         // Migration from the legacy global one-shot flag (raw read — get() would mask it in simple
         // mode): mark resolved ONLY knobs whose stored value differs from the factory default (they
         // were plausibly applied by the old run, or user-set — don't rewrite them). Knobs still AT
@@ -255,44 +327,11 @@ open class OpenAPSBoostV5Plugin @Inject constructor(
         val allKeys = BoostV5AutoConfigApply.managedDoubleKeys.map { it.key } + managedBooleanKeys.map { it.key }
         if (allKeys.all { isResolved(it) }) return
 
-        val now = dateUtil.now()
-        val start = now - BoostV5AutoConfig.LOOKBACK_DAYS * 24L * 60 * 60 * 1000
-
-        // TDD (median over available days) + days-of-data.
-        val tdds = tddCalculator.calculate(BoostV5AutoConfig.LOOKBACK_DAYS, allowMissingDays = true)
-        val tddValues = mutableListOf<Double>()
-        if (tdds != null) for (i in 0 until tdds.size()) {
-            val t = tdds.valueAt(i)
-            val total = if (t.totalAmount > 0) t.totalAmount else t.basalAmount + t.bolusAmount
-            if (total > 0) tddValues.add(total)
-        }
-        val tddMedian = BoostV5AutoConfig.percentile(tddValues, 50.0)
-        val daysWithData = tddValues.size
-
-        // Boluses split into manual (meal) vs SMB.
-        val boluses = persistenceLayer.getBolusesFromTimeToTime(start, now, true)
-        val manual = boluses.filter { it.type == BS.Type.NORMAL && it.amount > 0 }.map { it.amount }
-        val smb = boluses.filter { it.type == BS.Type.SMB && it.amount > 0 }.map { it.amount }
-
-        // Glycaemia (TBR / severe / mean) from CGM.
-        val bgs = persistenceLayer.getBgReadingsDataFromTimeToTime(start, now, true)
-        val n = bgs.size
-        val tbr70 = if (n > 0) 100.0 * bgs.count { it.value >= 1.0 && it.value < 70.0 } / n else 0.0
-        val sev54 = if (n > 0) 100.0 * bgs.count { it.value >= 1.0 && it.value < 54.0 } / n else 0.0
-        val meanBg = if (n > 0) bgs.sumOf { it.value } / n else 0.0
-
-        val suggestion = BoostV5AutoConfig.compute(
-            BoostV5AutoConfig.V1Profile(
-                daysWithData = daysWithData, bgReadingCount = n, tddMedianU = tddMedian,
-                manualBolusesU = manual, smbAmountsU = smb,
-                tbrBelow70Pct = tbr70, timeBelow54Pct = sev54, meanGlucoseMgdl = meanBg,
-                currentMaxIobU = constraintsChecker.getMaxIOBAllowed().value(),
-                currentMaxBolusU = constraintsChecker.getMaxBolusAllowed().value()
-            )
-        )
+        val profile = profileProvider()
+        val suggestion = BoostV5AutoConfig.compute(profile)
         if (suggestion == null) {
             // Nothing resolves here: every open knob stays eligible and genuinely retries next cycle.
-            aapsLogger.info(LTag.APS, "BoostV5 auto-config: insufficient V1 history (days=$daysWithData, bg=$n) — will retry")
+            aapsLogger.info(LTag.APS, "BoostV5 auto-config: insufficient V1 history (days=${profile.daysWithData}, bg=${profile.bgReadingCount}) — will retry")
             return
         }
 
@@ -304,15 +343,14 @@ open class OpenAPSBoostV5Plugin @Inject constructor(
         // cumulative cap is recomputed inside from the final operative per-shot caps.
         val resolutions = BoostV5AutoConfigApply.applyAutoConfig(
             suggestion,
-            tbrBelow70Pct = tbr70,
-            timeBelow54Pct = sev54,
+            tbrBelow70Pct = profile.tbrBelow70Pct,
+            timeBelow54Pct = profile.timeBelow54Pct,
             isResolved = { isResolved(it.key) },
             storedValue = { preferences.getIfExists(it) },
             put = { key, value -> preferences.put(key, value) },
             markResolved = { markResolved(it.key) }
         )
         // Log every classification verbatim so field diagnosis never needs inference.
-        fun shortName(key: DoubleKey) = key.name.removePrefix("ApsBoostV5").removePrefix("ApsBoost")
         resolutions.forEach { aapsLogger.info(LTag.APS, "BoostV5 auto-config: ${it.key.key} → ${it.reason}") }
         val applied = resolutions.filter { it.outcome == BoostV5AutoConfigApply.Outcome.APPLIED }
             .map { "${shortName(it.key)}=${it.suggestedValue}" }.toMutableList()
@@ -340,8 +378,8 @@ open class OpenAPSBoostV5Plugin @Inject constructor(
                 // Name whichever guard(s) actually tripped (<70 raise-guard and/or the 2026-07-07
                 // <54 severe co-guard) so the user sees why the raise was held.
                 val why = buildList {
-                    if (tbr70 > BoostV5AutoConfigApply.TBR_RAISE_GUARD_PCT) add("time-below-70 is ${Math.round(tbr70 * 10.0) / 10.0}%")
-                    if (sev54 >= BoostV5AutoConfigApply.TBR54_RAISE_GUARD_PCT) add("time-below-54 is ${Math.round(sev54 * 10.0) / 10.0}%")
+                    if (profile.tbrBelow70Pct > BoostV5AutoConfigApply.TBR_RAISE_GUARD_PCT) add("time-below-70 is ${Math.round(profile.tbrBelow70Pct * 10.0) / 10.0}%")
+                    if (profile.timeBelow54Pct >= BoostV5AutoConfigApply.TBR54_RAISE_GUARD_PCT) add("time-below-54 is ${Math.round(profile.timeBelow54Pct * 10.0) / 10.0}%")
                 }.joinToString(" and ")
                 "${shortName(it.key)}: suggested ${it.suggestedValue} U from your history — not auto-applied because " +
                     "$why; set manually in Advanced if desired"
@@ -354,6 +392,143 @@ open class OpenAPSBoostV5Plugin @Inject constructor(
                 Notification.INFO
             )
         }
+    }
+
+    /**
+     * Konzept 7 (2026-08-26) — periodic re-suggestion review. On [PERIODIC_REVIEW_INTERVAL_MS],
+     * re-derive EVERY BoostV5AutoConfig-managed double knob (regardless of BoostV5AutoConfigApply's
+     * per-knob resolution lock — this is a SEPARATE, recurring, human-confirmed path, not a
+     * bypass of "a human decision takes precedence") from the user's CURRENT V1 history and diff
+     * against the CURRENTLY operative value ([BoostV5PeriodicReview]). If anything differs, surface
+     * ONE notification; tapping it opens a single dialog listing every changed item with its own
+     * rationale and a "manually set" marker where applicable, with per-item checkboxes plus
+     * bulk apply-all/discard. Nothing is written until the user confirms in the dialog.
+     */
+    private fun maybePeriodicReview(now: Long, profileProvider: () -> BoostV5AutoConfig.V1Profile) {
+        val lastReview = preferences.get(LongNonKey.ApsBoostV5PeriodicReviewLastMs)
+        if (lastReview != 0L && now - lastReview < PERIODIC_REVIEW_INTERVAL_MS) return
+
+        val profile = profileProvider()
+        val items = BoostV5PeriodicReview.computeReviewItems(profile) { preferences.getIfExists(it) }
+        if (items == null) {
+            // Insufficient history — do NOT stamp the timestamp, so this genuinely retries once
+            // enough data accrues (same discipline as maybeAutoConfigure's insufficient-data path).
+            aapsLogger.info(LTag.APS, "BoostV5 periodic review: insufficient V1 history (days=${profile.daysWithData}, bg=${profile.bgReadingCount}) — will retry")
+            return
+        }
+        preferences.put(LongNonKey.ApsBoostV5PeriodicReviewLastMs, now)
+        if (items.isEmpty()) {
+            aapsLogger.info(LTag.APS, "BoostV5 periodic review: every managed knob already matches its fresh suggestion — nothing to show")
+            return
+        }
+        // Human-readable form for the app log only (free text, not parsed by anything).
+        val logSummary = items.joinToString { "${shortName(it.key)} ${it.currentValue}→${it.suggestedValue}" }
+        aapsLogger.info(LTag.APS, "BoostV5 periodic review: ${items.size} item(s) differ from their fresh suggestion: $logSummary")
+        // Threaded into THIS cycle's rT by runShadow() (called from runEngine(), right after
+        // invoke() returns) — see pendingPeriodicReviewNsNote's KDoc. Gives this event the same
+        // NS (it.reason) + in-app Script-debug (consoleError) visibility as every other shadow note,
+        // even though — unlike those — this is a discrete settings-review event, not a continuous
+        // per-cycle value (same category as the one-shot auto-config banner, which historically
+        // only got a Notification, not NS/consoleError; this closes that gap for the recurring path).
+        //
+        // Format matches the SAME "tag: key=value key=value;" convention every other shadow note
+        // uses (floorSlewShadow, exerciseShadow, alcoholShadow, ...) — deliberately NOT a new RT
+        // field: RT.kt documents a reproduced VerifyError/instant-startup-crash (2026-07-18, KAIROS
+        // Twin) from adding fields to this @Serializable class near the ART method-verifier's
+        // register limit. items= holds "Key:current->suggested" triples, comma-separated (no spaces
+        // inside the value so a naive split on whitespace still finds the other key=value pairs).
+        val itemsTag = items.joinToString(",") { "${shortName(it.key)}:${it.currentValue}->${it.suggestedValue}" }
+        pendingPeriodicReviewNsNote = "periodicReview: count=${items.size} items=$itemsTag; "
+
+        // A previous review notification may still be sitting unread in the store (14-day gaps are
+        // long). NotificationStore.add() de-dupes by id but KEEPS the OLD object on a collision
+        // (only bumps date/validTo) — so without an explicit dismiss first, a stale notification
+        // from the last cycle would silently swallow this fresh one, and tapping it would open the
+        // OLD `items` (old suggestions, no longer matching current preferences). Dismiss first so
+        // the store always ends up holding the fresh notification/items.
+        uiInteraction.dismissNotification(Notification.BOOST_V5_PERIODIC_REVIEW)
+        uiInteraction.addNotificationWithContextAction(
+            id = Notification.BOOST_V5_PERIODIC_REVIEW,
+            text = rh.gs(R.string.boost_v5_periodic_review_notification, items.size),
+            level = Notification.INFO,
+            buttonText = R.string.boost_v5_periodic_review_button,
+            action = { context -> showPeriodicReviewDialog(context, items) },
+            validityCheck = null
+        )
+    }
+
+    /**
+     * The Konzept 7 review dialog. Same construction pattern as every other AAPS dialog
+     * ([app.aaps.core.ui.dialogs.OKDialog]): [MaterialAlertDialogBuilder] with
+     * [app.aaps.core.ui.R.style.DialogTheme] + [AlertDialogHelper.buildCustomTitle] — this alone is
+     * what makes it inherit the app's light/dark theme automatically, no manual styling needed.
+     * One checkbox per changed knob (all pre-checked — these are reasoned, backtested-formula
+     * suggestions), each row showing current → suggested plus its own rationale and a
+     * "manually set" marker when the current value was a deliberate prior choice (not a factory
+     * default). Three actions: Apply selected (positive, respects checkboxes), Apply all (neutral,
+     * ignores checkbox state), Discard (negative, writes nothing).
+     */
+    private fun showPeriodicReviewDialog(context: Context, items: List<BoostV5PeriodicReview.ReviewItem>) {
+        val labels = items.map { item ->
+            val tunedMarker = if (item.wasUserTuned) " " + rh.gs(R.string.boost_v5_periodic_review_manually_set_marker) else ""
+            "${shortName(item.key)}$tunedMarker: ${item.currentValue} → ${item.suggestedValue}\n${item.rationale}" as CharSequence
+        }.toTypedArray()
+        val checked = BooleanArray(items.size) { true }
+
+        // Items were computed when the notification fired, which may have been days ago (14-day
+        // interval; nothing forces an immediate tap). If the user ALSO changed one of the same
+        // knobs by hand in the meantime (e.g. in Settings), item.currentValue is stale — blindly
+        // writing suggestedValue over it would silently clobber a more recent manual decision,
+        // which is exactly backwards for a project built on "a human decision takes precedence"
+        // (BoostV5AutoConfigApply's own core principle). So re-read the LIVE stored value right
+        // before writing and skip (not overwrite) any item where it has drifted since capture.
+        fun applyItems(indices: List<Int>) {
+            var applied = 0
+            var skippedStale = 0
+            for (i in indices) {
+                val item = items[i]
+                val live = preferences.getIfExists(item.key) ?: item.key.defaultValue
+                if (abs(live - item.currentValue) > 1e-6) {
+                    skippedStale++
+                    aapsLogger.info(
+                        LTag.APS,
+                        "BoostV5 periodic review: skipped ${shortName(item.key)} — value changed since this review " +
+                            "was computed (now $live, review captured ${item.currentValue}); re-run the review to reconsider it"
+                    )
+                    continue
+                }
+                preferences.put(item.key, item.suggestedValue)
+                applied++
+            }
+            if (applied > 0) aapsLogger.info(LTag.APS, "BoostV5 periodic review: applied $applied item(s)")
+            // ONE addNotification call, not two: Notification.USER_MESSAGE is a shared/generic id
+            // (reused across the app for ad-hoc one-off messages, incl. the auto-config banner
+            // above) and NotificationStore.add() de-dupes by id but keeps the FIRST object on a
+            // same-id collision within the same store update — two calls back-to-back here would
+            // silently drop the second (see the same dedup behavior noted for
+            // Notification.BOOST_V5_PERIODIC_REVIEW above). Combine into one message instead.
+            val toastParts = buildList {
+                if (applied > 0) add(rh.gs(R.string.boost_v5_periodic_review_applied_toast, applied))
+                if (skippedStale > 0) add(rh.gs(R.string.boost_v5_periodic_review_skipped_stale_toast, skippedStale))
+            }
+            if (toastParts.isNotEmpty()) {
+                uiInteraction.addNotification(Notification.USER_MESSAGE, toastParts.joinToString(" "), Notification.INFO)
+            }
+        }
+
+        MaterialAlertDialogBuilder(context, app.aaps.core.ui.R.style.DialogTheme)
+            .setCustomTitle(AlertDialogHelper.buildCustomTitle(context, rh.gs(R.string.boost_v5_periodic_review_dialog_title)))
+            .setMultiChoiceItems(labels, checked) { _, which, isChecked -> checked[which] = isChecked }
+            .setPositiveButton(rh.gs(R.string.boost_v5_periodic_review_apply_selected)) { dialog, _ ->
+                applyItems(checked.indices.filter { checked[it] })
+                dialog.dismiss()
+            }
+            .setNeutralButton(rh.gs(R.string.boost_v5_periodic_review_apply_all)) { dialog, _ ->
+                applyItems(items.indices.toList())
+                dialog.dismiss()
+            }
+            .setNegativeButton(rh.gs(R.string.boost_v5_periodic_review_discard)) { dialog, _ -> dialog.dismiss() }
+            .show()
     }
 
     // Enable/show under the same condition as plain Boost (temp-basal-capable pump) — delegate to
@@ -403,6 +578,17 @@ open class OpenAPSBoostV5Plugin @Inject constructor(
         postRescueWindow: Boolean = false,
     ): V5Decision? {
         return try {
+            // Konzept 7 (2026-08-26) — periodic review note, if maybePeriodicReview() computed a
+            // fresh review THIS cycle (rare, ~once/14d). Threaded through here (not written directly
+            // from maybePeriodicReview, which runs in invoke() BEFORE this cycle's rT exists) so it
+            // still lands in Nightscout (it.reason) and the in-app Script-debug screen
+            // (consoleError = APSResult.scriptDebug), same visibility as every other shadow note.
+            // Consumed exactly once — cleared immediately so it never repeats on a later cycle.
+            pendingPeriodicReviewNsNote?.let { note ->
+                rT.reason.append(note)
+                rT.consoleError?.add(note.trimEnd(' ', ';'))
+                pendingPeriodicReviewNsNote = null
+            }
             val priorState = stateStore.load()
             val inputs = buildInputs(rT, glucoseStatus, iobArray, oapsProfile, pumpBolusStep, activeMode, microBolusAllowed, flatBGsDetected, asleep, postRescueWindow)
             val decision = determineBasalBoostV5.decide(inputs, priorState)

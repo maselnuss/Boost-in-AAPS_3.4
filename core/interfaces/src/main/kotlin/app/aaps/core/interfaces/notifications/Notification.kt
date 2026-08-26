@@ -147,6 +147,11 @@ open class Notification {
 
         const val USER_MESSAGE = 1000
 
+        // Konzept 7 (2026-08-26) — Boost V6 periodic auto-config review. Own ID (not USER_MESSAGE)
+        // so a re-fired review replaces/de-dupes its own banner instead of stacking under the
+        // generic one-off message ID.
+        const val BOOST_V5_PERIODIC_REVIEW = 1001
+
         const val IMPORTANCE_HIGH = 2
         const val CATEGORY_ALARM = "alarm"
     }

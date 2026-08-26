@@ -34,5 +34,11 @@ enum class LongNonKey(
     // (0 = no active session) purely so the Overview button can display elapsed time. Display-only —
     // the Fragment never writes this, and the Plugin's own decision logic never reads it back.
     ApsBoostAlcoholProtectionStartMs("boost_alcohol_protection_start_ms", 0L),
+
+    // Konzept 7 (2026-08-26) — periodic BoostV5AutoConfig re-suggestion review: epoch ms of the last
+    // time the review notification was shown to the user (0 = never). Independent of the per-knob
+    // resolution state in BoostV5AutoConfigApply — this periodic path re-derives EVERY managed value
+    // (including ones already resolved) on an interval and lets the user pick per-item what to apply.
+    ApsBoostV5PeriodicReviewLastMs("boost_v5_periodic_review_last_ms", 0L),
 }
 

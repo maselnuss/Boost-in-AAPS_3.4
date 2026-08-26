@@ -153,6 +153,16 @@
     <string name="boost_floor_slew_aggressiveness_title">Aggressiveness (%)</string>
     <string name="boost_floor_slew_aggressiveness_summary" formatted="false">Scales the rolling estimate stronger (higher %) or weaker (lower %) than the raw computed values — at higher settings, a HIGHER floor% (blocks compression sooner) and a LOWER/tighter slew% (opposite numeric directions, because that\'s what "stricter" means for each — see the section summary above). Default: 100 (unscaled). The estimate is always clamped to a safe range regardless of this setting: floor 20-60%, slew 1-10%/cycle.</string>
 
+    <string name="boost_v5_periodic_review_notification">Boost V6 review: %1$d setting(s) could be updated from your recent history. Tap to review.</string>
+    <string name="boost_v5_periodic_review_button">Review</string>
+    <string name="boost_v5_periodic_review_dialog_title">Boost V6 Setting Review</string>
+    <string name="boost_v5_periodic_review_manually_set_marker">(manually set)</string>
+    <string name="boost_v5_periodic_review_apply_selected">Apply selected</string>
+    <string name="boost_v5_periodic_review_apply_all">Apply all</string>
+    <string name="boost_v5_periodic_review_discard">Discard</string>
+    <string name="boost_v5_periodic_review_applied_toast">Boost V6 review: updated %1$d setting(s).</string>
+    <string name="boost_v5_periodic_review_skipped_stale_toast">Boost V6 review: skipped %1$d setting(s) that changed since this review was computed — re-open Review to reconsider them.</string>
+
     <!-- Boost Preference Screen Sections -->
     <string name="boost_settings_default_aaps">Default AAPS Settings</string>
     <string name="boost_settings_boost_controls">Boost Controls</string>

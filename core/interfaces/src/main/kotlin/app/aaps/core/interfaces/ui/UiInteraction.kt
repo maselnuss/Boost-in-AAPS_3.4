@@ -113,6 +113,20 @@ interface UiInteraction {
     fun addNotificationWithDialogResponse(id: Int, text: String, level: Int, @StringRes buttonText: Int, title: String, message: String, validityCheck: (() -> Boolean)?)
 
     /**
+     * Add notification whose button action needs a live UI [Context] (e.g. to build a custom
+     * dialog) rather than the fixed title/message [addNotificationWithDialogResponse] offers.
+     * Same context-availability rules as every other notification action: [action] only runs once
+     * the notification is tapped in the list, at which point the row's own context is available —
+     * do not capture a [Context] at call time, it isn't valid yet.
+     * @param id id of notification
+     * @text text of notification
+     * @level urgency level of notification
+     * @buttonText label of button
+     * @action invoked with the tap-time [Context] when the button is pressed
+     */
+    fun addNotificationWithContextAction(id: Int, text: String, level: Int, @StringRes buttonText: Int, action: (Context) -> Unit, validityCheck: (() -> Boolean)?, @RawRes soundId: Int? = null, date: Long = System.currentTimeMillis(), validTo: Long = 0)
+
+    /**
      * Add notification that executes [Runnable] after clicking button
      * @param id if of notification
      * @text text of notification
