@@ -531,7 +531,10 @@ class DetermineBasalBoostV3MLG3 @Inject constructor(
         // RT object initialization
         // =====================================================================
         rT = RT(
-            algorithm = APSResult.Algorithm.SMB,
+            // 2026-08-26: was SMB — same leftover-from-SMB-fork mistagging found and fixed in the
+            // active DetermineBasalBoost.kt; fixed here too for consistency (this variant is legacy/
+            // unused but still selectable). Metadata-only fix, no dosing logic touched.
+            algorithm = APSResult.Algorithm.BOOST,
             runningDynamicIsf = true,
             timestamp = currentTime,
             bg = bg,
