@@ -1,5 +1,6 @@
 package app.aaps.plugins.aps.openAPSBoostV5
 
+import app.aaps.core.keys.BooleanKey
 import app.aaps.core.keys.DoubleKey
 import com.google.common.truth.Truth.assertThat
 import org.junit.jupiter.api.Test
@@ -68,5 +69,65 @@ class BoostV5PeriodicReviewTest {
         val p = profile(tbr70 = 8.0, sev54 = 2.5)
         val items = BoostV5PeriodicReview.computeReviewItems(p) { null }!!
         assertThat(items.map { it.key.key }.none { it.contains("alcohol", ignoreCase = true) }).isTrue()
+    }
+
+    // ── Boolean switches (2026-08-27 gap fix) — same contract as the double-knob tests above ──
+
+    @Test fun `boolean review insufficient history returns null, not empty`() {
+        val items = BoostV5PeriodicReview.computeBooleanReviewItems(profile(days = 5)) { null }
+        assertThat(items).isNull()
+    }
+
+    @Test fun `boolean review empty when every switch already matches its fresh suggestion`() {
+        val p = profile(tbr70 = 2.5, sev54 = 0.2)   // not hypo-prone, not well-controlled -> defaults
+        val suggestion = BoostV5AutoConfig.compute(p)!!
+        val currentBool = mapOf(
+            BooleanKey.ApsBoostV5FastCarbConfirm to suggestion.fastCarbConfirm,
+            BooleanKey.ApsBoostV5AggressiveEarlyConfirm to suggestion.aggressiveEarlyConfirm,
+            BooleanKey.ApsBoostV5VelocityBudgetActive to suggestion.velocityBudgetFloor,
+            BooleanKey.ApsBoostV5PrimerTbrFallback to suggestion.primerTbrFallback
+        )
+        val items = BoostV5PeriodicReview.computeBooleanReviewItems(p) { currentBool[it] }
+        assertThat(items).isNotNull()
+        assertThat(items).isEmpty()
+    }
+
+    @Test fun `boolean review surfaces a switch left at factory default when the suggestion differs`() {
+        // Hypo-prone -> fastCarbConfirm suggests false; factory default is true (unset = default).
+        val p = profile(tbr70 = 8.0, sev54 = 2.5)
+        val items = BoostV5PeriodicReview.computeBooleanReviewItems(p) { null }!!
+        val item = items.single { it.key == BooleanKey.ApsBoostV5FastCarbConfirm }
+        assertThat(item.currentValue).isEqualTo(BooleanKey.ApsBoostV5FastCarbConfirm.defaultValue)
+        assertThat(item.suggestedValue).isFalse()
+        assertThat(item.rationale).contains("OFF")
+        assertThat(item.wasUserTuned).isFalse()
+    }
+
+    @Test fun `boolean review marks a manually tuned switch that still differs from the suggestion`() {
+        // NOTE on why this profile, not the hypo-prone one used elsewhere in this file: a Boolean
+        // only has 2 possible values. Whenever the derived suggestion DIFFERS from the factory
+        // default (e.g. hypoProne -> fastCarbConfirm suggests false, default is true), the only two
+        // possible stored states are "at default" (not user-tuned by definition) or "equals the
+        // suggestion" (which wouldn't surface as a review item at all — current == suggested is
+        // filtered out). So wasUserTuned=true on a SURFACED boolean item is only possible when the
+        // suggestion equals the default and the user manually flipped it to the non-default value —
+        // exactly the case here: NOT hypo-prone -> fastCarbConfirm suggests true (= factory default,
+        // ApsBoostV5FastCarbConfirm's default is true), user has manually turned it off.
+        val p = profile(tbr70 = 0.5, sev54 = 0.0)
+        val current = mapOf(BooleanKey.ApsBoostV5FastCarbConfirm to false)
+        val items = BoostV5PeriodicReview.computeBooleanReviewItems(p) { current[it] }!!
+        val item = items.single { it.key == BooleanKey.ApsBoostV5FastCarbConfirm }
+        assertThat(item.currentValue).isFalse()
+        assertThat(item.suggestedValue).isTrue()
+        assertThat(item.wasUserTuned).isTrue()
+    }
+
+    @Test fun `boolean review covers all 4 managed switches when everything is unset`() {
+        val p = profile(tbr70 = 0.5, sev54 = 0.0)   // well-controlled -> several switches flip from default
+        val items = BoostV5PeriodicReview.computeBooleanReviewItems(p) { null }!!
+        val keys = items.map { it.key }.toSet()
+        // well-controlled flips AggressiveEarlyConfirm/VelocityBudgetActive to true (default false)
+        // and PrimerTbrFallback to false... which IS the default (false), so it does NOT surface.
+        assertThat(keys).containsAtLeast(BooleanKey.ApsBoostV5AggressiveEarlyConfirm, BooleanKey.ApsBoostV5VelocityBudgetActive)
     }
 }

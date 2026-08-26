@@ -251,6 +251,7 @@ open class OpenAPSBoostV5Plugin @Inject constructor(
 
     /** Short, human-readable knob name for log lines / notification text (drops the common prefixes). */
     private fun shortName(key: DoubleKey) = key.name.removePrefix("ApsBoostV5").removePrefix("ApsBoost")
+    private fun shortName(key: BooleanKey) = key.name.removePrefix("ApsBoostV5").removePrefix("ApsBoost")
 
     /**
      * Gather the last-[BoostV5AutoConfig.LOOKBACK_DAYS]-day [BoostV5AutoConfig.V1Profile] from the
@@ -420,21 +421,28 @@ open class OpenAPSBoostV5Plugin @Inject constructor(
         if (lastReview != 0L && now - lastReview < PERIODIC_REVIEW_INTERVAL_MS) return
 
         val profile = profileProvider()
-        val items = BoostV5PeriodicReview.computeReviewItems(profile) { preferences.getIfExists(it) }
-        if (items == null) {
+        // 2026-08-27 — covers the 4 managed BOOLEAN switches too, not just the double-valued knobs
+        // (was a real gap: they were only ever decided ONCE by the one-shot AutoConfig at first V6
+        // activation, never reconsidered here). Both calls share the SAME BoostV5AutoConfig.compute()
+        // gate on the SAME profile, so they're null/non-null together — no real divergence risk.
+        val doubleItems = BoostV5PeriodicReview.computeReviewItems(profile) { preferences.getIfExists(it) }
+        val booleanItems = BoostV5PeriodicReview.computeBooleanReviewItems(profile) { preferences.getIfExists(it) }
+        if (doubleItems == null || booleanItems == null) {
             // Insufficient history — do NOT stamp the timestamp, so this genuinely retries once
             // enough data accrues (same discipline as maybeAutoConfigure's insufficient-data path).
             aapsLogger.info(LTag.APS, "BoostV5 periodic review: insufficient V1 history (days=${profile.daysWithData}, bg=${profile.bgReadingCount}) — will retry")
             return
         }
         preferences.put(LongNonKey.ApsBoostV5PeriodicReviewLastMs, now)
-        if (items.isEmpty()) {
-            aapsLogger.info(LTag.APS, "BoostV5 periodic review: every managed knob already matches its fresh suggestion — nothing to show")
+        val totalCount = doubleItems.size + booleanItems.size
+        if (totalCount == 0) {
+            aapsLogger.info(LTag.APS, "BoostV5 periodic review: every managed knob/switch already matches its fresh suggestion — nothing to show")
             return
         }
         // Human-readable form for the app log only (free text, not parsed by anything).
-        val logSummary = items.joinToString { "${shortName(it.key)} ${it.currentValue}→${it.suggestedValue}" }
-        aapsLogger.info(LTag.APS, "BoostV5 periodic review: ${items.size} item(s) differ from their fresh suggestion: $logSummary")
+        val logSummary = (doubleItems.map { "${shortName(it.key)} ${it.currentValue}→${it.suggestedValue}" } +
+            booleanItems.map { "${shortName(it.key)} ${it.currentValue}→${it.suggestedValue}" }).joinToString()
+        aapsLogger.info(LTag.APS, "BoostV5 periodic review: $totalCount item(s) differ from their fresh suggestion: $logSummary")
         // Threaded into THIS cycle's rT by runShadow() (called from runEngine(), right after
         // invoke() returns) — see pendingPeriodicReviewNsNote's KDoc. Gives this event the same
         // NS (it.reason) + in-app Script-debug (consoleError) visibility as every other shadow note,
@@ -447,9 +455,11 @@ open class OpenAPSBoostV5Plugin @Inject constructor(
         // field: RT.kt documents a reproduced VerifyError/instant-startup-crash (2026-07-18, KAIROS
         // Twin) from adding fields to this @Serializable class near the ART method-verifier's
         // register limit. items= holds "Key:current->suggested" triples, comma-separated (no spaces
-        // inside the value so a naive split on whitespace still finds the other key=value pairs).
-        val itemsTag = items.joinToString(",") { "${shortName(it.key)}:${it.currentValue}->${it.suggestedValue}" }
-        pendingPeriodicReviewNsNote = "periodicReview: count=${items.size} items=$itemsTag; "
+        // inside the value so a naive split on whitespace still finds the other key=value pairs) —
+        // double AND boolean items share the same flat list, no separate sub-tag needed.
+        val itemsTag = (doubleItems.map { "${shortName(it.key)}:${it.currentValue}->${it.suggestedValue}" } +
+            booleanItems.map { "${shortName(it.key)}:${it.currentValue}->${it.suggestedValue}" }).joinToString(",")
+        pendingPeriodicReviewNsNote = "periodicReview: count=$totalCount items=$itemsTag; "
 
         // A previous review notification may still be sitting unread in the store (14-day gaps are
         // long). NotificationStore.add() de-dupes by id but KEEPS the OLD object on a collision
@@ -460,10 +470,10 @@ open class OpenAPSBoostV5Plugin @Inject constructor(
         uiInteraction.dismissNotification(Notification.BOOST_V5_PERIODIC_REVIEW)
         uiInteraction.addNotificationWithContextAction(
             id = Notification.BOOST_V5_PERIODIC_REVIEW,
-            text = rh.gs(R.string.boost_v5_periodic_review_notification, items.size),
+            text = rh.gs(R.string.boost_v5_periodic_review_notification, totalCount),
             level = Notification.INFO,
             buttonText = R.string.boost_v5_periodic_review_button,
-            action = { context -> showPeriodicReviewDialog(context, items) },
+            action = { context -> showPeriodicReviewDialog(context, doubleItems, booleanItems) },
             validityCheck = null
         )
     }
@@ -513,7 +523,11 @@ open class OpenAPSBoostV5Plugin @Inject constructor(
      * side-by-side. "Apply all" was redundant anyway: unchecking is opt-out, so an untouched dialog
      * already IS "apply all" via the positive button.
      */
-    private fun showPeriodicReviewDialog(context: Context, items: List<BoostV5PeriodicReview.ReviewItem>) {
+    private fun showPeriodicReviewDialog(
+        context: Context,
+        doubleItems: List<BoostV5PeriodicReview.ReviewItem>,
+        booleanItems: List<BoostV5PeriodicReview.BooleanReviewItem>
+    ) {
         val density = context.resources.displayMetrics.density
         fun dp(v: Int) = (v * density).toInt()
 
@@ -525,33 +539,23 @@ open class OpenAPSBoostV5Plugin @Inject constructor(
         // rationale line below it — a clear title/detail hierarchy instead of one dense paragraph.
         // No hardcoded colors (theme-safe light/dark): the rationale is de-emphasised via alpha on
         // the theme's own default text color, not a fixed color value.
-        val checkBoxes = mutableListOf<CheckBox>()
         val container = LinearLayout(context).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(dp(24), dp(8), dp(24), dp(8))
         }
-        for (item in items) {
-            val name = shortName(item.key)
-            val tunedMarker = if (item.wasUserTuned) " " + rh.gs(R.string.boost_v5_periodic_review_manually_set_marker) else ""
-            val checkBox = CheckBox(context).apply { isChecked = true }
-            checkBoxes += checkBox
-            // Delta gets its own color (on top of the title's overall bold) so the actual CHANGE —
-            // not just the knob name — jumps out, per feedback: it was "hidden in the text" before.
-            // Standard Material palette green/red (500-weight — designed to read on light AND dark
-            // surfaces, unlike the app's BG-specific high/low colors which carry a different meaning
-            // here and would be confusing: this is an increase/decrease of a SETTING, not a glucose
-            // reading).
+
+        fun row(checkBox: CheckBox, name: String, tunedMarker: String, deltaText: String, deltaColor: Int?, rationale: String) {
             val prefix = "$name$tunedMarker: "
-            val delta = "${item.currentValue} → ${item.suggestedValue}"
-            val deltaColor = if (item.suggestedValue > item.currentValue) Color.parseColor("#4CAF50") else Color.parseColor("#F44336")
             val titleView = TextView(context).apply {
-                text = SpannableString(prefix + delta).apply {
-                    setSpan(ForegroundColorSpan(deltaColor), prefix.length, prefix.length + delta.length, Spannable.SPAN_EXCLUSIVE_EXCLUSIVE)
+                text = SpannableString(prefix + deltaText).apply {
+                    if (deltaColor != null) {
+                        setSpan(ForegroundColorSpan(deltaColor), prefix.length, prefix.length + deltaText.length, Spannable.SPAN_EXCLUSIVE_EXCLUSIVE)
+                    }
                 }
                 setTypeface(typeface, Typeface.BOLD)
             }
             val rationaleView = TextView(context).apply {
-                text = dialogRationale(item.key, item.rationale)
+                text = rationale
                 textSize = 13f
                 alpha = 0.7f
                 setPadding(0, dp(2), 0, 0)
@@ -562,15 +566,55 @@ open class OpenAPSBoostV5Plugin @Inject constructor(
                 addView(titleView)
                 addView(rationaleView)
             }
-            val row = LinearLayout(context).apply {
+            val rowLayout = LinearLayout(context).apply {
                 orientation = LinearLayout.HORIZONTAL
                 gravity = Gravity.TOP
                 setPadding(0, dp(10), 0, dp(10))
                 addView(checkBox)
                 addView(textColumn)
             }
-            container.addView(row)
+            container.addView(rowLayout)
         }
+
+        val doubleCheckBoxes = mutableListOf<CheckBox>()
+        for (item in doubleItems) {
+            val checkBox = CheckBox(context).apply { isChecked = true }
+            doubleCheckBoxes += checkBox
+            // Delta gets its own color (on top of the title's overall bold) so the actual CHANGE —
+            // not just the knob name — jumps out, per feedback: it was "hidden in the text" before.
+            // Standard Material palette green/red (500-weight — designed to read on light AND dark
+            // surfaces, unlike the app's BG-specific high/low colors which carry a different meaning
+            // here and would be confusing: this is an increase/decrease of a SETTING, not a glucose
+            // reading).
+            val deltaColor = if (item.suggestedValue > item.currentValue) Color.parseColor("#4CAF50") else Color.parseColor("#F44336")
+            row(
+                checkBox = checkBox,
+                name = shortName(item.key),
+                tunedMarker = if (item.wasUserTuned) " " + rh.gs(R.string.boost_v5_periodic_review_manually_set_marker) else "",
+                deltaText = "${item.currentValue} → ${item.suggestedValue}",
+                deltaColor = deltaColor,
+                rationale = dialogRationale(item.key, item.rationale)
+            )
+        }
+
+        // 2026-08-27 — boolean switches (fastCarbConfirm, aggressiveEarlyConfirm, velocityBudgetFloor,
+        // primerTbrFallback), same row style as the double knobs above. No green/red delta coloring
+        // here on purpose: ON/OFF has no inherent "higher is more" direction the way a number does,
+        // so coloring it would imply a good/bad judgement that isn't actually there.
+        val booleanCheckBoxes = mutableListOf<CheckBox>()
+        for (item in booleanItems) {
+            val checkBox = CheckBox(context).apply { isChecked = true }
+            booleanCheckBoxes += checkBox
+            row(
+                checkBox = checkBox,
+                name = shortName(item.key),
+                tunedMarker = if (item.wasUserTuned) " " + rh.gs(R.string.boost_v5_periodic_review_manually_set_marker) else "",
+                deltaText = "${if (item.currentValue) "ON" else "OFF"} → ${if (item.suggestedValue) "ON" else "OFF"}",
+                deltaColor = null,
+                rationale = item.rationale
+            )
+        }
+
         val scrollableContent = ScrollView(context).apply { addView(container) }
 
         // Items were computed when the notification fired, which may have been days ago (14-day
@@ -580,13 +624,30 @@ open class OpenAPSBoostV5Plugin @Inject constructor(
         // which is exactly backwards for a project built on "a human decision takes precedence"
         // (BoostV5AutoConfigApply's own core principle). So re-read the LIVE stored value right
         // before writing and skip (not overwrite) any item where it has drifted since capture.
-        fun applyItems(indices: List<Int>) {
+        // Handles BOTH double and boolean selections and fires exactly ONE combined toast — see the
+        // Notification.USER_MESSAGE dedup note below for why it must stay a single call.
+        fun applySelections(doubleIndices: List<Int>, booleanIndices: List<Int>) {
             var applied = 0
             var skippedStale = 0
-            for (i in indices) {
-                val item = items[i]
+            for (i in doubleIndices) {
+                val item = doubleItems[i]
                 val live = preferences.getIfExists(item.key) ?: item.key.defaultValue
                 if (abs(live - item.currentValue) > 1e-6) {
+                    skippedStale++
+                    aapsLogger.info(
+                        LTag.APS,
+                        "BoostV5 periodic review: skipped ${shortName(item.key)} — value changed since this review " +
+                            "was computed (now $live, review captured ${item.currentValue}); re-run the review to reconsider it"
+                    )
+                    continue
+                }
+                preferences.put(item.key, item.suggestedValue)
+                applied++
+            }
+            for (i in booleanIndices) {
+                val item = booleanItems[i]
+                val live = preferences.getIfExists(item.key) ?: item.key.defaultValue
+                if (live != item.currentValue) {
                     skippedStale++
                     aapsLogger.info(
                         LTag.APS,
@@ -618,7 +679,10 @@ open class OpenAPSBoostV5Plugin @Inject constructor(
             .setCustomTitle(AlertDialogHelper.buildCustomTitle(context, rh.gs(R.string.boost_v5_periodic_review_dialog_title)))
             .setView(scrollableContent)
             .setPositiveButton(rh.gs(R.string.boost_v5_periodic_review_apply_selected)) { dialog, _ ->
-                applyItems(checkBoxes.indices.filter { checkBoxes[it].isChecked })
+                applySelections(
+                    doubleCheckBoxes.indices.filter { doubleCheckBoxes[it].isChecked },
+                    booleanCheckBoxes.indices.filter { booleanCheckBoxes[it].isChecked }
+                )
                 dialog.dismiss()
             }
             .setNegativeButton(rh.gs(R.string.boost_v5_periodic_review_discard)) { dialog, _ -> dialog.dismiss() }

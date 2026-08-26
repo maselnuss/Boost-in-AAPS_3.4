@@ -1,5 +1,6 @@
 package app.aaps.plugins.aps.openAPSBoostV5
 
+import app.aaps.core.keys.BooleanKey
 import app.aaps.core.keys.DoubleKey
 import kotlin.math.abs
 
@@ -69,6 +70,61 @@ object BoostV5PeriodicReview {
                 suggestedValue = suggested,
                 rationale = suggestion.rationaleByKey[key] ?: "",
                 wasUserTuned = BoostV5AutoConfigApply.isUserTuned(key, stored)
+            )
+        }
+    }
+
+    // 2026-08-27 — the 4 managed BOOLEAN switches (fastCarbConfirm, aggressiveEarlyConfirm,
+    // velocityBudgetFloor, primerTbrFallback) were a real gap: only ever decided ONCE by the
+    // one-shot AutoConfig (OpenAPSBoostV5Plugin.managedBooleanKeys), never reconsidered by this
+    // periodic path. Deliberately duplicated here rather than importing managedBooleanKeys (which
+    // is private to the plugin, UI-layer) — this file stays pure/plugin-independent, same as
+    // candidateKnobs() above already does for the double knobs. Keep in sync with
+    // OpenAPSBoostV5Plugin.managedBooleanKeys if that list ever changes.
+    private val candidateBooleanKeys: List<BooleanKey> = listOf(
+        BooleanKey.ApsBoostV5FastCarbConfirm,
+        BooleanKey.ApsBoostV5AggressiveEarlyConfirm,
+        BooleanKey.ApsBoostV5VelocityBudgetActive,
+        BooleanKey.ApsBoostV5PrimerTbrFallback
+    )
+
+    data class BooleanReviewItem(
+        val key: BooleanKey,
+        val currentValue: Boolean,
+        val suggestedValue: Boolean,
+        val rationale: String,
+        val wasUserTuned: Boolean
+    )
+
+    /**
+     * Boolean-switch counterpart to [computeReviewItems] — same null/empty-list semantics (null =
+     * insufficient history, empty = nothing to review). No MIN_ABS_DELTA equivalent needed: a
+     * Boolean either matches or it doesn't, no float-noise tolerance required. "wasUserTuned" is a
+     * plain "differs from the current factory default" check — booleans in this codebase have never
+     * had a documented historical-default change (unlike some of the double caps), so there's no
+     * factoryDefaults()-style multi-era lookup needed here, matching how
+     * OpenAPSBoostV5Plugin.maybeAutoConfigure's OWN per-boolean resolution already treats them
+     * (`stored == null || stored == bk.defaultValue` = eligible/untuned).
+     */
+    fun computeBooleanReviewItems(p: BoostV5AutoConfig.V1Profile, currentValue: (BooleanKey) -> Boolean?): List<BooleanReviewItem>? {
+        val suggestion = BoostV5AutoConfig.compute(p) ?: return null
+        val suggestedByKey = mapOf(
+            BooleanKey.ApsBoostV5FastCarbConfirm to suggestion.fastCarbConfirm,
+            BooleanKey.ApsBoostV5AggressiveEarlyConfirm to suggestion.aggressiveEarlyConfirm,
+            BooleanKey.ApsBoostV5VelocityBudgetActive to suggestion.velocityBudgetFloor,
+            BooleanKey.ApsBoostV5PrimerTbrFallback to suggestion.primerTbrFallback
+        )
+        return candidateBooleanKeys.mapNotNull { key ->
+            val suggested = suggestedByKey.getValue(key)
+            val stored = currentValue(key)
+            val current = stored ?: key.defaultValue
+            if (current == suggested) return@mapNotNull null
+            BooleanReviewItem(
+                key = key,
+                currentValue = current,
+                suggestedValue = suggested,
+                rationale = suggestion.rationaleByBooleanKey[key] ?: "",
+                wasUserTuned = stored != null && stored != key.defaultValue
             )
         }
     }

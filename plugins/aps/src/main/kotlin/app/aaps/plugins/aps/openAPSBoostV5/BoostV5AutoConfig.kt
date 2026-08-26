@@ -1,5 +1,6 @@
 package app.aaps.plugins.aps.openAPSBoostV5
 
+import app.aaps.core.keys.BooleanKey
 import app.aaps.core.keys.DoubleKey
 import kotlin.math.max
 import kotlin.math.min
@@ -107,9 +108,18 @@ object BoostV5AutoConfig {
         // 2026-08-26 — Konzept 7 (periodic review): same reasoning as [rationale] but keyed per
         // managed DoubleKey, so the review dialog can show each item's OWN rationale rather than the
         // full unkeyed log line. Covers every key in BoostV5AutoConfigApply.managedDoubleKeys plus
-        // ApsBoostFloorSlewAggressiveness. Not exhaustive for boolean knobs (fastCarbConfirm etc.) —
-        // Konzept 7 only reviews the double-valued knobs.
-        val rationaleByKey: Map<DoubleKey, String>
+        // ApsBoostFloorSlewAggressiveness.
+        val rationaleByKey: Map<DoubleKey, String>,
+        // 2026-08-27 — same idea as [rationaleByKey] but for the 4 managed BOOLEAN switches
+        // (fastCarbConfirm, aggressiveEarlyConfirm, velocityBudgetFloor, primerTbrFallback). Added
+        // so Konzept 7's periodic review can cover these too — previously only the double-valued
+        // knobs were re-suggested periodically; the booleans were only ever decided ONCE at first V6
+        // activation (a real gap, not intentional scope — same underlying compute(), just wasn't
+        // wired into the recurring review). Unlike rationaleByKey, this one has a reason for BOTH
+        // directions (ON and OFF), not just whichever direction happened to differ from default at
+        // first-activation time — the periodic review needs to explain a suggestion regardless of
+        // which way it points.
+        val rationaleByBooleanKey: Map<BooleanKey, String>
     )
 
     /** Returns null when there isn't enough data to responsibly auto-configure. */
@@ -118,6 +128,7 @@ object BoostV5AutoConfig {
 
         val reasons = mutableListOf<String>()
         val rationaleByKey = mutableMapOf<DoubleKey, String>()
+        val rationaleByBooleanKey = mutableMapOf<BooleanKey, String>()
         val hypoProne = p.timeBelow54Pct > SEV54_HYPO_PRONE || p.tbrBelow70Pct > TBR70_HYPO_PRONE
         // Moved up from its original spot below (still used there too) — the new floor/slew
         // aggressiveness derivation needs it alongside hypoProne.
@@ -189,6 +200,10 @@ object BoostV5AutoConfig {
         // Fast-carb confirm: keep on unless markedly hypo-prone (then off for caution).
         val fastCarbConfirm = !hypoProne
         if (hypoProne) reasons += "Fast-carb confirm OFF (cautious start — notable hypo history)"
+        rationaleByBooleanKey[BooleanKey.ApsBoostV5FastCarbConfirm] = if (hypoProne)
+            "OFF — cautious start, notable hypo history (<70 ${pct(p.tbrBelow70Pct)}, <54 ${pct(p.timeBelow54Pct)})"
+        else
+            "ON — no notable hypo history, no need for extra caution"
 
         // 2026-07-17 insulin-ADDING opt-in switches (aggressive early confirm, velocity-budget floor)
         // — auto-enable ONLY for clearly well-controlled users (strict low-glucose cut). They add a
@@ -197,10 +212,25 @@ object BoostV5AutoConfig {
         // live fail-closed 14d-TBR gate downstream.)
         val aggressiveEarlyConfirm = wellControlled
         val velocityBudgetFloor = wellControlled
-        reasons += if (wellControlled)
-            "Aggressive early confirm + velocity-budget floor ON (low-glucose exposure well within target: <70 ${pct(p.tbrBelow70Pct)}, <54 ${pct(p.timeBelow54Pct)})"
-        else
-            "Aggressive early confirm + velocity-budget floor OFF (enabled only for very low low-glucose exposure)"
+        run {
+            val why = if (wellControlled)
+                "Aggressive early confirm + velocity-budget floor ON (low-glucose exposure well within target: <70 ${pct(p.tbrBelow70Pct)}, <54 ${pct(p.timeBelow54Pct)})"
+            else
+                "Aggressive early confirm + velocity-budget floor OFF (enabled only for very low low-glucose exposure)"
+            reasons += why
+            // Same source condition (wellControlled) drives both switches, but the periodic review
+            // shows ONE switch per row (its own header already names it) — a rationale that also
+            // names the OTHER switch would read oddly there ("why does my AggressiveEarlyConfirm row
+            // mention velocity-budget floor?"). Switch-agnostic version for the review dialog; the
+            // combined `why` (both names) stays in the flat log/NS reasons list above, where it's
+            // read as one line describing both at once, not per-switch.
+            val whyPerSwitch = if (wellControlled)
+                "ON — low-glucose exposure well within target (<70 ${pct(p.tbrBelow70Pct)}, <54 ${pct(p.timeBelow54Pct)})"
+            else
+                "OFF — enabled only for very low low-glucose exposure"
+            rationaleByBooleanKey[BooleanKey.ApsBoostV5AggressiveEarlyConfirm] = whyPerSwitch
+            rationaleByBooleanKey[BooleanKey.ApsBoostV5VelocityBudgetActive] = whyPerSwitch
+        }
 
         // 2026-07-20 V1-acceleration early primer. Fizzle-safe by size (backtesting/scripts/
         // 2026-07-v1-acceleration: pure fizzle-low +0.9%, no excess) — so it's enabled for everyone
@@ -223,6 +253,10 @@ object BoostV5AutoConfig {
             val why = "Primer ${primerCapU}U ${if (primerTbrFallback) "via retractable temp-basal (override-able to bolus)" else "as bolus (well-controlled)"} — reclaims V1's ~15-min earlier acceleration response, fizzle-safe by size, netted off the commit-shot"
             reasons += why
             rationaleByKey[DoubleKey.ApsBoostV5PrimerCapU] = why
+            rationaleByBooleanKey[BooleanKey.ApsBoostV5PrimerTbrFallback] = if (primerTbrFallback)
+                "Temp-basal routing — safer unwind for your current control level (overridable via Force bolus primer)"
+            else
+                "Bolus routing — your control level is well within target"
         }
 
         // Floor/slew aggressiveness [50..150], default 100 (neutral): UNLIKE Aggression/HypoCaution
@@ -266,7 +300,8 @@ object BoostV5AutoConfig {
             primerTbrFallback = primerTbrFallback,
             floorSlewAggressiveness = floorSlewAggressiveness,
             rationale = reasons,
-            rationaleByKey = rationaleByKey
+            rationaleByKey = rationaleByKey,
+            rationaleByBooleanKey = rationaleByBooleanKey
         )
     }
 

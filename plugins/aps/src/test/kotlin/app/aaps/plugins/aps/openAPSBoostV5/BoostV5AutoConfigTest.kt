@@ -1,5 +1,6 @@
 package app.aaps.plugins.aps.openAPSBoostV5
 
+import app.aaps.core.keys.BooleanKey
 import app.aaps.core.keys.DoubleKey
 import com.google.common.truth.Truth.assertThat
 import org.junit.jupiter.api.Test
@@ -185,6 +186,36 @@ class BoostV5AutoConfigTest {
             assertThat(s.rationaleByKey).containsKey(key)
             assertThat(s.rationaleByKey.getValue(key)).isNotEmpty()
         }
+    }
+
+    // 2026-08-27 — Konzept 7 gap fix: the periodic review originally only covered the double-valued
+    // knobs, never the 4 managed boolean switches (they were only ever decided once, at first V6
+    // activation). rationaleByBooleanKey is the boolean equivalent of rationaleByKey, needed for the
+    // same reason — one rationale per key so the review dialog can explain each item on its own.
+    @Test fun `rationaleByBooleanKey covers every managed boolean switch`() {
+        val s = BoostV5AutoConfig.compute(profile())!!
+        val expectedKeys = listOf(
+            BooleanKey.ApsBoostV5FastCarbConfirm,
+            BooleanKey.ApsBoostV5AggressiveEarlyConfirm,
+            BooleanKey.ApsBoostV5VelocityBudgetActive,
+            BooleanKey.ApsBoostV5PrimerTbrFallback
+        )
+        for (key in expectedKeys) {
+            assertThat(s.rationaleByBooleanKey).containsKey(key)
+            assertThat(s.rationaleByBooleanKey.getValue(key)).isNotEmpty()
+        }
+    }
+
+    // Both directions of each switch must have a rationale — the periodic review needs to explain
+    // a suggestion whichever way it points, not just whichever direction happened to differ from
+    // factory default at first-activation time (that was the old one-shot AutoConfig's only need).
+    @Test fun `boolean switch rationale covers both ON and OFF, not just the direction that differs from default`() {
+        val hypoProne = BoostV5AutoConfig.compute(profile(tbr70 = 8.0, sev54 = 2.5))!!   // fastCarbConfirm -> false (OFF)
+        val calm = BoostV5AutoConfig.compute(profile(tbr70 = 0.5, sev54 = 0.0))!!         // fastCarbConfirm -> true (ON)
+        assertThat(hypoProne.fastCarbConfirm).isFalse()
+        assertThat(calm.fastCarbConfirm).isTrue()
+        assertThat(hypoProne.rationaleByBooleanKey.getValue(BooleanKey.ApsBoostV5FastCarbConfirm)).contains("OFF")
+        assertThat(calm.rationaleByBooleanKey.getValue(BooleanKey.ApsBoostV5FastCarbConfirm)).contains("ON")
     }
 
     // ── Application of the suggestion (BoostV5AutoConfigApply): per-key resolution ──
