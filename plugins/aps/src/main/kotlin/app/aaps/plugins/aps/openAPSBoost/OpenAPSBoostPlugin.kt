@@ -2007,6 +2007,27 @@ open class OpenAPSBoostPlugin @Inject constructor(
                 it.reason.append("accelMeal=$trig,${Round.roundTo(accel, 0.1)},${Round.roundTo(glucoseStatus.shortAvgDelta, 0.1)}," +
                     "${Round.roundTo(glucoseStatus.longAvgDelta, 0.1)},${glucoseStatus.glucose.toInt()},${v5decision?.mealHypothesis ?: "?"}; ")
             }.onFailure { t -> aapsLogger.error(LTag.APS, "Accel-meal shadow failed (swallowed — dosing untouched)", t) }
+            // Dose-budget composition SHADOW (2026-08-27, user request: "wie oft/wie stark ist der
+            // Cap wirklich die bindende Grenze?"). READ-ONLY telemetry — logs the PRE-cap components
+            // that go into applyStateDoseCap(), never affects dosing. Without this, a historical
+            // counterfactual ("what would a different confirmedCapU/committedCapU have delivered?")
+            // could only be approximated (mlHypoRiskScale/postExerciseRecoveryScale aren't persisted
+            // anywhere else — computed fresh each cycle, then discarded). Logging the exact components
+            // lets a future replay reconstruct `velocityScaled = budget × actionMultiplier ×
+            // velocityFactor` (the value BEFORE applyStateDoseCap) precisely instead of guessing it —
+            // see DetermineBasalBoostV5.kt lines ~369-390. Cap values themselves are NOT logged here
+            // (they're a stable preference, not per-cycle telemetry — read the live confirmedCapU/
+            // committedCapU setting directly when doing that analysis).
+            runCatching {
+                v5decision?.let { d ->
+                    val b = d.aggressionBudget
+                    it.reason.append(
+                        "boostV5Budget=${d.mealHypothesis},${Round.roundTo(b.budget, 0.001)}," +
+                            "${Round.roundTo(d.velocityFactor, 0.001)},${Round.roundTo(d.actionMultiplier, 0.001)}," +
+                            "${Round.roundTo(b.mlHypoRiskScale, 0.001)},${Round.roundTo(b.postExerciseRecoveryScale, 0.001)}; "
+                    )
+                }
+            }.onFailure { t -> aapsLogger.error(LTag.APS, "Dose-budget shadow failed (swallowed — dosing untouched)", t) }
             // Sleep gate (2026-06-14): do NOT let V5 drive the SMB while SLEEPING — fall back to V1's
             // (oref1/Boost) SMB, which already respects night mode. V5 still computes its shadow
             // telemetry above (runShadow ran), so the V5-vs-V1 comparison continues overnight; only
