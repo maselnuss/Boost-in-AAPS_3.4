@@ -29,6 +29,16 @@ object DailyStepHistoryTracker {
     const val ACTIVITY_RATIO_FULL = 2.0          // ratio ≥ this saturates the activity factor (2× baseline)
     const val INACTIVITY_RATIO_FULL = 0.4        // ratio ≤ this saturates the inactivity factor (≤40%)
 
+    /** Below this many EXPECTED steps, the intraday ratio is too noisy to mean anything — a stray
+     *  100-200 step night-time trip to the bathroom shouldn't read as "exercising". 2026-08-27 fix:
+     *  the overnight [DIURNAL_FRACTION] floor (0.02) already guards against literal divide-by-zero,
+     *  but at a typical baseline it still lets a handful of steps saturate the ratio (found live: a
+     *  user's `boostActivityLoad_intradayRatio` was pinned >= 2.0 across ~300 of ~300 cycles in a
+     *  day, including 00:01-00:06 — no realistic exercise, just the small-denominator instability).
+     *  Same "not enough signal yet" philosophy as [MIN_DAYS_FOR_BASELINE], applied per-cycle instead
+     *  of per-day. */
+    const val MIN_EXPECTED_STEPS_FOR_INTRADAY_FACTOR = 150
+
     /** Local epoch-day index from a UTC instant + local offset (so day boundaries are the user's). */
     fun dayIndex(utcMs: Long, localOffsetMs: Long): Long = (utcMs + localOffsetMs) / DAY_MS
 
@@ -47,12 +57,16 @@ object DailyStepHistoryTracker {
      * Intraday "running hot?" factor: today's cumulative [stepsToday] vs expected-by-now
      * ([baseline] × the diurnal fraction for [hour]). RAISE-ONLY (acute exercise → more sensitive →
      * +ISF), capped at [ACTIVITY_MAX_ISF_PCT]; below-pace returns 0 (the next-day factor owns the
-     * lower-activity direction). Null baseline → no factor. ~6 ops; no I/O.
+     * lower-activity direction). Null baseline → no factor. Below
+     * [MIN_EXPECTED_STEPS_FOR_INTRADAY_FACTOR] expected steps (overnight/early morning) → no factor
+     * either, ratio too noisy to mean anything (2026-08-27 fix — see the constant's KDoc). ~6 ops;
+     * no I/O.
      */
     fun intradayFactor(stepsToday: Int, baseline: Int?, hour: Int): IntradayFactor {
         if (baseline == null || baseline <= 0) return IntradayFactor(null, 0.0, 0)
         val frac = DIURNAL_FRACTION[hour.coerceIn(0, 23)].coerceAtLeast(0.02)
         val expected = baseline * frac
+        if (expected < MIN_EXPECTED_STEPS_FOR_INTRADAY_FACTOR) return IntradayFactor(null, 0.0, expected.toInt())
         val ratio = stepsToday / expected
         val pct = (((ratio - 1.0) / (ACTIVITY_RATIO_FULL - 1.0)).coerceIn(0.0, 1.0)) * ACTIVITY_MAX_ISF_PCT
         return IntradayFactor(ratio, pct, expected.toInt())
