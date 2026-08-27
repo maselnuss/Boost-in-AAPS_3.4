@@ -84,6 +84,7 @@ import app.aaps.plugins.aps.OpenAPSFragment
 import app.aaps.plugins.aps.R
 import app.aaps.plugins.aps.events.EventOpenAPSUpdateGui
 import app.aaps.plugins.aps.events.EventResetOpenAPSGui
+import com.google.android.gms.location.DetectedActivity
 import org.json.JSONObject
 import java.time.LocalTime
 import java.time.format.DateTimeFormatter
@@ -142,8 +143,9 @@ open class OpenAPSBoostPlugin @Inject constructor(
     private val healthConnectHrIngest: HealthConnectHrIngest,
     // Activity-load SHADOW (2026-06-16) — HC steps → single-source daily totals for the step baseline.
     private val healthConnectStepsIngest: HealthConnectStepsIngest,
-    // Konzept 8 exercise-detection SHADOW (2026-08-26) — HC ExerciseSessionRecord, log-only.
-    private val healthConnectExerciseIngest: HealthConnectExerciseIngest
+    // Konzept 8 GPS part SHADOW (2026-08-27) — Activity Recognition Transition updates (ON_BICYCLE,
+    // phone-only, live), log-only. See GpsActivityRecognitionIngest.kt.
+    private val gpsActivityRecognitionIngest: GpsActivityRecognitionIngest
 ) : PluginBase(
     PluginDescription()
         .mainType(PluginType.APS)
@@ -409,13 +411,11 @@ open class OpenAPSBoostPlugin @Inject constructor(
     @Volatile private var alcoholLastSeenTapMs: Long = 0L             // last ALC tap timestamp already reacted to
     @Volatile private var alcoholLastSeenCancelMs: Long = 0L          // last long-press cancel request already reacted to
 
-    // Konzept 8 (2026-08-26) — dedup so the same detected exercise session isn't re-logged every
-    // cycle while still "relevant" (see ExerciseShadow.isCurrentlyRelevant). Keyed by session endMs;
-    // a Set (not one Long) because more than one still-relevant session can coexist (e.g. badminton
-    // and a bike ride both within the last 90min). Not restart-safe by design: at most one harmless
-    // duplicate log line per session after a process restart, never a correctness issue since this
-    // only gates a log line, nothing dosing-relevant. Pruned each cycle to the relevant window.
-    private val loggedExerciseSessionEndMs = java.util.concurrent.ConcurrentHashMap.newKeySet<Long>()
+    // Konzept 8 GPS part (2026-08-27) — dedup so the same transition isn't re-logged every cycle
+    // while still "relevant". Not restart-safe by design: at most one harmless duplicate log line
+    // per event after a process restart, never a correctness issue since this only gates a log
+    // line, nothing dosing-relevant. Pruned each cycle to the relevant window.
+    private val loggedGpsTransitionMs = java.util.concurrent.ConcurrentHashMap.newKeySet<Long>()
 
     // ---- Lifecycle ----
 
@@ -1046,8 +1046,9 @@ open class OpenAPSBoostPlugin @Inject constructor(
         healthConnectHrIngest.syncIfDue()
         // 2026-06-16: Health Connect STEPS ingest (activity-load shadow). Throttled internally.
         healthConnectStepsIngest.syncIfDue()
-        // Konzept 8 (2026-08-26): Health Connect EXERCISE ingest (exercise-detection shadow). Throttled internally.
-        healthConnectExerciseIngest.syncIfDue()
+        // Konzept 8 GPS part (2026-08-27): Activity Recognition Transition registration (ON_BICYCLE,
+        // live). Idempotent — only actually registers once per process; cheap no-op every other call.
+        gpsActivityRecognitionIngest.registerIfNeeded()
         lastAPSResult = null
         val glucoseStatus = glucoseStatusCalculatorSMB.glucoseStatusData
         val profile = profileFunction.getProfile()
@@ -1174,64 +1175,38 @@ open class OpenAPSBoostPlugin @Inject constructor(
             }
         } else null
 
-        // 1a. Exercise-detection shadow (Konzept 8, 2026-08-26) — Health Connect ExerciseSessionRecord,
-        // any type, log-only, never touches activityResult/TT/dosing. Real incident this targets:
-        // cycling not caught by the HR+steps detector above, real hypo, had to drink against it. For
-        // types ExerciseShadow.severityTier() maps to an existing post-exercise-recovery tier, also
-        // computes what that ALREADY-LIVE mechanism (see 1b below) WOULD have set — using the
-        // DURATION-AWARE + hyper-brake-aware proposal (PostExerciseRecoveryShadow.kt) rather than the
-        // live mechanism's own fixed-window formula, since Konzept 8 hasn't gone live at all yet —
-        // no reason to build it on the flawed formula from day one. Never actually applied here,
-        // purely a hypothetical for evaluation.
-        //
-        // NS-visible condensed notes (2026-08-26) — this whole "1a/1b" section runs BEFORE
-        // determine_basal()/the rT result object exists (see .also{it->} far below), so shadow
-        // findings here are collected into local StringBuilders and appended to it.reason once that
-        // object exists — otherwise they'd only ever live in on-device logcat, useless for
-        // evaluating these concepts remotely over the coming weeks.
+        // NS-visible condensed notes — this whole section runs BEFORE determine_basal()/the rT
+        // result object exists (see .also{it->} far below), so shadow findings here are collected
+        // into local StringBuilders and appended to it.reason once that object exists — otherwise
+        // they'd only ever live in on-device logcat, useless for evaluating these concepts remotely.
         val exerciseShadowNsNotes = StringBuilder()
         val postExerciseShadowNsNotes = StringBuilder()
         var v6PreMealShadowNsNote: String? = null
-        for (session in healthConnectExerciseIngest.recentSessions) {
-            if (!ExerciseShadow.isCurrentlyRelevant(session, now)) continue
-            if (!loggedExerciseSessionEndMs.add(session.endMs)) continue   // already logged this session
-            val minutesAgo = (now - session.endMs) / 60_000L
-            val sessionDurationMin = (session.endMs - session.startMs) / 60_000L
-            val hrCaughtItToo = activityResult.activityState in setOf("RESISTANCE", "MODERATE_AEROBIC", "VIGOROUS_AEROBIC", "LIGHT_AEROBIC", "ACTIVE")
-            val tier = ExerciseShadow.severityTier(session.exerciseType)
-            val consequenceNote = if (tier == null) {
-                "type not mapped to a severity tier — detection only, no hypothetical consequence computed"
-            } else {
-                // Exact same multiplier table as the real post-exercise recovery mechanism below
-                // (1b) — MODERATE_AEROBIC has no dedicated row there either, so it (like anything
-                // else unrecognised) falls to the same else/default the real code uses.
-                val (windowMultiplier, targetOffsetMgdl, scaleMultiplier) = when (tier) {
-                    "VIGOROUS_AEROBIC" -> Triple(exerciseVigorousWindowMult, 0.0, exerciseVigorousScaleMult)
-                    "RESISTANCE" -> Triple(exerciseResistanceWindowMult, exerciseResistanceTargetOffset, exerciseResistanceScaleMult)
-                    else -> Triple(1.0, 0.0, 1.0)
-                }
-                val fixedWindowMin = (postExerciseRecoveryHours * 60.0 * windowMultiplier).toInt()
-                val hypotheticalWindowMin = PostExerciseRecoveryShadow.durationScaledWindowMin(sessionDurationMin, fixedWindowMin)
-                val hypotheticalTarget = postExerciseRecoveryTarget + targetOffsetMgdl
-                val hypotheticalScale = PostExerciseRecoveryShadow.effectiveScale(
-                    (postExerciseRecoveryScale * scaleMultiplier).coerceIn(0.1, 1.0),
-                    glucoseStatus.glucose
-                )
-                "tier=$tier, session duration=${sessionDurationMin}min -> would set post-exercise recovery: " +
-                    "window=${hypotheticalWindowMin}min (fixed-formula would be ${fixedWindowMin}min) " +
-                    "target=${hypotheticalTarget.toInt()}mg/dL SMBscale=$hypotheticalScale " +
-                    "(current BG=${glucoseStatus.glucose}, hyper-brake ${if (PostExerciseRecoveryShadow.hyperBrakeActive(glucoseStatus.glucose)) "ACTIVE" else "inactive"})"
+
+        // 1a. Konzept 8 GPS part (2026-08-27) — live ON_BICYCLE transitions. (The Health Connect
+        // ExerciseSessionRecord half of Konzept 8 was reverted 2026-08-27 — no realistic path to
+        // real value: Galaxy Watch only auto-detects Walking/Running/Cycling, and Badminton/Swimming
+        // would need a MANUAL workout start on the watch the user doesn't do; cycling itself is now
+        // covered live, and better, by this GPS path. See TODO.md for the full reasoning.) Appended
+        // to the exerciseShadowNsNotes StringBuilder (flushed to reason/consoleError further below)
+        // — detection only, no effect on TT/dosing.
+        for (transition in gpsActivityRecognitionIngest.recentTransitions) {
+            if (!loggedGpsTransitionMs.add(transition.atMs)) continue   // already logged this event
+            val label = when (transition.activityType) {
+                DetectedActivity.ON_BICYCLE -> "ON_BICYCLE"
+                else -> "type${transition.activityType}"
             }
+            val direction = if (transition.entering) "ENTER" else "EXIT"
+            val hrCaughtItToo = activityResult.activityState in setOf("RESISTANCE", "MODERATE_AEROBIC", "VIGOROUS_AEROBIC", "LIGHT_AEROBIC", "ACTIVE")
             aapsLogger.debug(
                 LTag.APS,
-                "Exercise detected (SHADOW, source=${session.source}, exerciseType=${session.exerciseType}): " +
-                    "session ${dateUtil.dateAndTimeString(session.startMs)} -> ${dateUtil.dateAndTimeString(session.endMs)}, " +
-                    "ended ${minutesAgo}min ago; existing HR+steps detector this cycle: activityState=${activityResult.activityState} " +
-                    "(${if (hrCaughtItToo) "also caught it" else "MISSED"}); $consequenceNote — logged only, no effect on TT/dosing"
+                "GPS activity transition (SHADOW): $label $direction at ${dateUtil.dateAndTimeString(transition.atMs)}; " +
+                    "existing HR+steps detector this cycle: activityState=${activityResult.activityState} " +
+                    "(${if (hrCaughtItToo) "also caught it" else "MISSED"}) — logged only, no effect on TT/dosing"
             )
-            exerciseShadowNsNotes.append("exerciseShadow: type=${session.exerciseType} tier=${tier ?: "unmapped"} durMin=$sessionDurationMin hrCaught=$hrCaughtItToo; ")
+            exerciseShadowNsNotes.append("gpsActivity: type=$label transition=$direction hrCaught=$hrCaughtItToo; ")
         }
-        loggedExerciseSessionEndMs.removeIf { now - it > ExerciseShadow.RELEVANT_AFTER_END_MIN * 60_000L }
+        loggedGpsTransitionMs.removeIf { now - it > GpsActivityRecognitionIngest.RECENT_MS }
 
         // 1b. Post-exercise recovery transition detection
         // HR-aware: all exercise states (aerobic, resistance) trigger recovery, not just "ACTIVE".
@@ -2974,7 +2949,7 @@ open class OpenAPSBoostPlugin @Inject constructor(
                     addPreference(AdaptiveSwitchPreference(ctx = context, booleanKey = BooleanKey.ApsBoostHealthConnectHrEnabled, summary = R.string.boost_hc_hr_summary, title = R.string.boost_hc_hr_title))
                     addPreference(AdaptiveIntPreference(ctx = context, intKey = IntKey.ApsBoostHealthConnectPollMin, dialogMessage = R.string.boost_hc_poll_summary, title = R.string.boost_hc_poll_title))
                     addPreference(AdaptiveSwitchPreference(ctx = context, booleanKey = BooleanKey.ApsBoostActivityShadowEnabled, summary = R.string.boost_activity_shadow_summary, title = R.string.boost_activity_shadow_title))
-                    addPreference(AdaptiveSwitchPreference(ctx = context, booleanKey = BooleanKey.ApsBoostHealthConnectExerciseEnabled, summary = R.string.boost_hc_exercise_summary, title = R.string.boost_hc_exercise_title))
+                    addPreference(AdaptiveSwitchPreference(ctx = context, booleanKey = BooleanKey.ApsBoostGpsActivityRecognitionEnabled, summary = R.string.boost_gps_activity_summary, title = R.string.boost_gps_activity_title))
                     addPreference(androidx.preference.Preference(context).apply {
                         key = "boost_hc_grant_permission_v1"
                         title = context.getString(R.string.boost_hc_grant_title)

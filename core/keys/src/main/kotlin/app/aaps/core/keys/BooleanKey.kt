@@ -82,9 +82,11 @@ enum class BooleanKey(
 
     // Health Connect HR ingest (2026-06-03) — bridge for overnight HR from Garmin/Wear OS via Android Health Connect
     ApsBoostHealthConnectHrEnabled("boost_health_connect_hr_enabled", false, defaultedBySM = true),
-    // Konzept 8 (2026-08-26) — SHADOW ONLY. Reads Health Connect ExerciseSessionRecord (watch-native
-    // training entries), logs exercise detection, never touches TT/dosing on its own.
-    ApsBoostHealthConnectExerciseEnabled("boost_health_connect_exercise_enabled", false, defaultedBySM = true),
+    // Konzept 8 GPS part (2026-08-27) — SHADOW ONLY. Android Activity Recognition Transition API
+    // (ON_BICYCLE enter/exit, phone-only, live) — see GpsActivityRecognitionIngest.kt. Never touches
+    // TT/dosing on its own. (The Health Connect ExerciseSessionRecord half of Konzept 8 was reverted
+    // 2026-08-27 — no realistic path to real value, see TODO.md — this GPS part is what remains.)
+    ApsBoostGpsActivityRecognitionEnabled("boost_gps_activity_recognition_enabled", false, defaultedBySM = true),
     // Konzept 1 (2026-08-26) — SHADOW ONLY. Rolling ISF-floor/slew-limiter estimate from recent
     // dosing history (see BoostFloorSlewShadow.kt) — logs a suggested floor%/slew%, never applies it.
     ApsBoostFloorSlewShadowEnabled("boost_floor_slew_shadow_enabled", false, defaultedBySM = true),

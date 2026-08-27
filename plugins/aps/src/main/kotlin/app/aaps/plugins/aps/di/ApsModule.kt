@@ -5,6 +5,7 @@ import app.aaps.core.interfaces.autotune.Autotune
 import app.aaps.plugins.aps.OpenAPSFragment
 import app.aaps.plugins.aps.autotune.AutotunePlugin
 import app.aaps.plugins.aps.loop.LoopPlugin
+import app.aaps.plugins.aps.openAPSBoost.GpsActivityTransitionReceiver
 import dagger.Binds
 import dagger.Module
 import dagger.android.ContributesAndroidInjector
@@ -21,6 +22,8 @@ import dagger.android.ContributesAndroidInjector
 abstract class ApsModule {
 
     @ContributesAndroidInjector abstract fun contributesOpenAPSFragment(): OpenAPSFragment
+    // Konzept 8 GPS part (2026-08-27) — Dagger field injection for the manifest-registered receiver.
+    @ContributesAndroidInjector abstract fun contributesGpsActivityTransitionReceiver(): GpsActivityTransitionReceiver
 
     @Module
     interface Bindings {

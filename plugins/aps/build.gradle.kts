@@ -38,5 +38,11 @@ dependencies {
     // Health Connect — for HR ingest path (2026-06-03)
     implementation(libs.androidx.health.connect.client)
 
+    // Play Services Activity Recognition — Konzept 8 GPS part (2026-08-27): live, phone-only
+    // ON_BICYCLE enter/exit transitions (real incident this targets: cycling missed by the
+    // HR+steps detector). Already used elsewhere in this repo (plugins/automation, plugins/sync) —
+    // same artifact, not a new dep.
+    implementation(libs.com.google.android.gms.playservices.location)
+
     ksp(libs.com.google.dagger.android.processor)
 }

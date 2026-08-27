@@ -7,14 +7,16 @@ import androidx.activity.result.ActivityResultLauncher
 import androidx.health.connect.client.HealthConnectClient
 import androidx.health.connect.client.PermissionController
 import androidx.health.connect.client.permission.HealthPermission
-import androidx.health.connect.client.records.ExerciseSessionRecord
 import androidx.health.connect.client.records.HeartRateRecord
 import androidx.health.connect.client.records.StepsRecord
 
 /**
  * HealthConnectPermissionActivity — single-purpose Activity that requests all
  * Health Connect read permissions Boost's Health Connect features need (heart
- * rate, steps, exercise sessions) and finishes.
+ * rate, steps) and finishes.
+ *
+ * (Used to also request ExerciseSessionRecord for Konzept 8's exercise-detection shadow — reverted
+ * 2026-08-27, see GpsActivityRecognitionIngest.kt's KDoc for why.)
  *
  * Wired from a Boost Night Mode preference (see plugin addPreferenceScreen).
  *
@@ -33,8 +35,7 @@ class HealthConnectPermissionActivity : ComponentActivity() {
     private lateinit var requestLauncher: ActivityResultLauncher<Set<String>>
     private val requiredPermissions = setOf(
         HealthPermission.getReadPermission(HeartRateRecord::class),
-        HealthPermission.getReadPermission(StepsRecord::class),           // Boost activity-load shadow (2026-06-16)
-        HealthPermission.getReadPermission(ExerciseSessionRecord::class)  // Konzept 8 exercise-detection shadow (2026-08-26)
+        HealthPermission.getReadPermission(StepsRecord::class)  // Boost activity-load shadow (2026-06-16)
     )
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -46,14 +47,13 @@ class HealthConnectPermissionActivity : ComponentActivity() {
         ) { granted ->
             val missing = requiredPermissions - granted
             val msg = if (missing.isEmpty()) {
-                "Health Connect: Heart Rate, Steps & Exercise access granted"
+                "Health Connect: Heart Rate & Steps access granted"
             } else {
                 // Android grants permissions individually, not all-or-nothing — name what's
-                // actually missing rather than a generic "denied" that implies all 3 failed.
+                // actually missing rather than a generic "denied" that implies both failed.
                 val missingNames = buildList {
                     if (HealthPermission.getReadPermission(HeartRateRecord::class) in missing) add("Heart Rate")
                     if (HealthPermission.getReadPermission(StepsRecord::class) in missing) add("Steps")
-                    if (HealthPermission.getReadPermission(ExerciseSessionRecord::class) in missing) add("Exercise")
                 }.joinToString(", ")
                 "Health Connect: missing permission(s) for $missingNames — those signals will not be ingested"
             }
