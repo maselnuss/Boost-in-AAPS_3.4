@@ -90,6 +90,11 @@ enum class BooleanKey(
     // Konzept 1 (2026-08-26) — SHADOW ONLY. Rolling ISF-floor/slew-limiter estimate from recent
     // dosing history (see BoostFloorSlewShadow.kt) — logs a suggested floor%/slew%, never applies it.
     ApsBoostFloorSlewShadowEnabled("boost_floor_slew_shadow_enabled", false, defaultedBySM = true),
+    // Konzept 10 (2026-08-27) — SHADOW ONLY. Post-meal peak/rebound backoff candidates: a looser
+    // COMMITTED->RECOVERING backoff (recoveringShadow=) and two continuous overshoot-dampening
+    // variants, fixed + self-calibrated from this user's own data (overshootGuardFixedShadow=/
+    // overshootGuardComputedShadow=, see BoostOvershootGuardShadow.kt). Logs only, never applied.
+    ApsBoostPeakShadowCandidatesEnabled("boost_peak_shadow_candidates_enabled", false, defaultedBySM = true),
     ApsBoostBypassVersionCheck("boost_bypass_version_check", true, defaultedBySM = true),
     // Boost V5 active-dosing alpha (2026-06-11) — when ON, V5's observe-confirm-commit SMB REPLACES
     // V1's SMB on cycles V1 permits one. V1 still owns basal + all safety gates. Toggle OFF = instant revert.

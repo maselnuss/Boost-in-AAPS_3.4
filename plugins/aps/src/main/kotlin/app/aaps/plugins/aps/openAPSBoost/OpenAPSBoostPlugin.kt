@@ -99,6 +99,7 @@ import kotlin.math.ln
 import kotlin.math.max
 import kotlin.math.min
 import app.aaps.plugins.aps.openAPSBoostV5.MealHypothesis
+import app.aaps.plugins.aps.openAPSBoostV5.RECOVERING_DECEL_THRESHOLD
 
 @Singleton
 open class OpenAPSBoostPlugin @Inject constructor(
@@ -172,6 +173,14 @@ open class OpenAPSBoostPlugin @Inject constructor(
          * detection should reasonably have taken over".
          */
         const val MANUAL_MEAL_WINDOW_MIN = 45
+
+        /**
+         * Backoff-loosening SHADOW guard (2026-08-27, see `recoveringShadow=` block below): filters
+         * the two premature-brake cases found in the 2026-08-27 14d backtest, both of which fired the
+         * loosened windowCycles=1 predicate while delta was still ~11-12 mg/dl/5min (a brisk ongoing
+         * rise, not noise). Shadow-only — never applied to dosing.
+         */
+        const val BACKOFF_GUARD_MAX_DELTA = 8.0
 
         /**
          * Minutes since [lastTapMs] (epoch ms), or [Int.MAX_VALUE] if there has never been a tap
@@ -345,6 +354,8 @@ open class OpenAPSBoostPlugin @Inject constructor(
     // Konzept 1 (2026-08-26) — see BoostFloorSlewShadow.kt.
     private val floorSlewShadowEnabled; get() = preferences.getBoostDosing(BooleanKey.ApsBoostFloorSlewShadowEnabled)
     private val floorSlewAggressiveness; get() = preferences.getBoostDosing(DoubleKey.ApsBoostFloorSlewAggressiveness)
+    // Konzept 10 (2026-08-27) — see BoostOvershootGuardShadow.kt + recoveringShadow= call site.
+    private val peakShadowCandidatesEnabled; get() = preferences.getBoostDosing(BooleanKey.ApsBoostPeakShadowCandidatesEnabled)
     private val postExerciseMinDuration; get() = preferences.getBoostDosing(IntKey.ApsBoostPostExerciseMinDuration)
 
     // ---- Feed-health edge detection (F4/F6, 2026-07-07) ----
@@ -1162,6 +1173,53 @@ open class OpenAPSBoostPlugin @Inject constructor(
             } catch (t: Throwable) {
                 aapsLogger.error(LTag.APS, "Floor/slew shadow (Konzept 1): compute failed (non-fatal)", t)
                 floorSlewSuggestionCached = null
+            }
+        }
+
+        // 0b. Overshoot-guard COMPUTED-variant rolling estimate (2026-08-27, Konzept 10). Same
+        // throttle/caching pattern as Floor/Slew above — a 14d APSResult scan is too heavy for
+        // every 5-min cycle, so recompute at most every overshootGuardRecomputeIntervalMs and
+        // re-log the cached estimate every cycle in between. See BoostOvershootGuardShadow.kt.
+        // eventualBG isn't a structured APSResult field, so it's parsed from the historical reason
+        // text ("Eventual BG X") — same resilient-parse pattern already used for live NS analysis
+        // of this exact field; unparseable/older-format entries are simply skipped, not fatal.
+        //
+        // 2026-08-27 fix (found on re-check): the P90 normalisation MUST be computed only over
+        // historical COMMITTED cycles — the exact population the guard actually applies to (see the
+        // call site below: only logged/relevant while mealHypothesis == COMMITTED). Sampling over
+        // ALL cycles (the first version of this block) would dilute the P90 with the vast majority
+        // of near-zero-overshoot IDLE/asleep/in-range cycles, pulling the estimate down toward the
+        // 40 mg/dl floor and making almost every real meal overshoot look "severe" (least-dampened)
+        // — silently defeating the "more caution on borderline overshoot" intent the whole shadow is
+        // built around. State is parsed from the same historical accelMeal=...,STATE tag already
+        // used for the recoveringShadow=/aimiGuardShadow=-successor logic above (fails closed: a
+        // record without that tag, e.g. from before it existed, is simply skipped like unparseable
+        // eventualBG).
+        if (peakShadowCandidatesEnabled && now - lastOvershootGuardComputeMs >= overshootGuardRecomputeIntervalMs) {
+            lastOvershootGuardComputeMs = now
+            try {
+                val since = now - 14 * 24 * 3600_000L
+                val eventualBgRegex = Regex("""Eventual BG (-?\d+\.?\d*)""")
+                val accelMealStateRegex = Regex("""accelMeal=-?\d+,-?\d+\.?\d*,-?\d+\.?\d*,-?\d+\.?\d*,-?\d+\.?\d*,(\w+)""")
+                val overshootSamples = persistenceLayer.getApsResults(since, now).mapNotNull { r ->
+                    val stateMatch = accelMealStateRegex.find(r.reason) ?: return@mapNotNull null
+                    if (stateMatch.groupValues[1] != "COMMITTED") return@mapNotNull null
+                    val m = eventualBgRegex.find(r.reason) ?: return@mapNotNull null
+                    val eventualBg = m.groupValues[1].toDoubleOrNull() ?: return@mapNotNull null
+                    val overshoot = (eventualBg - r.targetBG).coerceAtLeast(0.0)
+                    BoostOvershootGuardShadow.OvershootSample(r.date, overshoot)
+                }
+                overshootCoeffsComputedCached = BoostOvershootGuardShadow.computeCoefficients(
+                    committedCapU = preferences.get(DoubleKey.ApsBoostV5CommittedCapU),
+                    confirmedCapU = preferences.get(DoubleKey.ApsBoostV5ConfirmedCapU),
+                    overshootWindow = overshootSamples,
+                )
+                if (overshootCoeffsComputedCached == null) {
+                    aapsLogger.debug(LTag.APS, "Overshoot-guard shadow (Konzept 10): not enough samples yet (${overshootSamples.size}/${BoostOvershootGuardShadow.MIN_SAMPLES_FOR_ESTIMATE} needed)")
+                }
+            } catch (t: Throwable) {
+                aapsLogger.error(LTag.APS, "Overshoot-guard shadow (Konzept 10): compute failed (non-fatal)", t)
+                overshootCoeffsComputedCached = null
             }
         }
         val floorSlewNsNote: String? = if (floorSlewShadowEnabled) {
@@ -2003,6 +2061,79 @@ open class OpenAPSBoostPlugin @Inject constructor(
                     )
                 }
             }.onFailure { t -> aapsLogger.error(LTag.APS, "Dose-budget shadow failed (swallowed — dosing untouched)", t) }
+            // COMMITTED->RECOVERING backoff-loosening SHADOW (2026-08-27, user request re: post-meal
+            // peak/rebound backtest). READ-ONLY telemetry — compares the LIVE backoff predicate
+            // (deltaAccl < RECOVERING_DECEL_THRESHOLD AND long>short>delta, i.e. MealHypothesis.kt's
+            // windowCycles=2) against a loosened variant that drops the long-avg leg (only requires
+            // short>delta, windowCycles=1). The 2026-08-27 backtest (14d reason-text replay) found
+            // windowCycles=2 almost never fires within a COMMITTED run's lifetime (CGM noise breaks
+            // the 3-point long>short>delta chain), while windowCycles=1 fires ~1 cycle earlier in
+            // 13/44 runs (~10U SMB avoided over 14d) at a ~15% premature-brake rate (BG still rising
+            // >15 mg/dl in the next 15 min). BACKOFF_GUARD_MAX_DELTA filters the two premature cases
+            // found in that backtest (both had delta ~11-12 mg/dl/5min despite deltaAccl < -5%) —
+            // logged separately so the guard's real hit rate can be validated against live data
+            // before any dosing change is considered. Never affects dosing; only logged while V5
+            // currently holds COMMITTED (the only state this predicate is evaluated in). Gated
+            // behind ApsBoostPeakShadowCandidatesEnabled (default off) — see the preference screen.
+            if (peakShadowCandidatesEnabled) {
+                runCatching {
+                    if (v5decision?.mealHypothesis == MealHypothesis.COMMITTED) {
+                        val short = glucoseStatus.shortAvgDelta
+                        val delta = glucoseStatus.delta
+                        val deltaAcclNow = 100.0 * (delta - short) / max(abs(short), 2.0)
+                        val looseWouldFire = deltaAcclNow < RECOVERING_DECEL_THRESHOLD && short > delta
+                        val guardedWouldFire = looseWouldFire && delta < BACKOFF_GUARD_MAX_DELTA
+                        it.reason.append(
+                            "recoveringShadow=$looseWouldFire,$guardedWouldFire," +
+                                "${Round.roundTo(deltaAcclNow, 0.1)},${Round.roundTo(delta, 0.1)}; "
+                        )
+                    }
+                }.onFailure { t -> aapsLogger.error(LTag.APS, "Recovering-backoff shadow failed (swallowed — dosing untouched)", t) }
+            }
+            // Overshoot-guard SHADOW (2026-08-27, Konzept 10, see BoostOvershootGuardShadow.kt) —
+            // 3rd backoff candidate alongside recoveringShadow= above. A CONTINUOUS multiplier on
+            // the prospective dose, scaled by how far eventualBG already exceeds target — no state
+            // machine, no declining-streak, just a smooth function of the current cycle's own
+            // prediction. Concept ported from a comparable mechanism in the AIMI fork (see the
+            // object KDoc for the exact source line + verified direction), renamed away from "AIMI"
+            // since it's Boost's own re-derivation, not an AIMI import. Applies every COMMITTED
+            // cycle (not gated to a backoff transition like recoveringShadow=), so unlike that
+            // candidate this one could in principle affect PEAK height too, not just the post-peak
+            // tail. Logs BOTH variants side by side for comparison:
+            //  - overshootGuardFixedShadow=    AIMI's own coefficients, unvalidated for Boost.
+            //  - overshootGuardComputedShadow= re-derived from this user's own committedCapU/
+            //    confirmedCapU ratio + rolling P90 overshoot (see overshootCoeffsComputedCached
+            //    below) — "n/a" until MIN_SAMPLES_FOR_ESTIMATE rolling samples are available.
+            // Both logged against the ACTUAL delivered dose (v5decision.phase3.finalDose) for
+            // comparison. Never applied — never affects dosing. Gated behind
+            // ApsBoostPeakShadowCandidatesEnabled (default off) — see the preference screen.
+            if (peakShadowCandidatesEnabled) {
+                runCatching {
+                    v5decision?.let { d ->
+                        if (d.mealHypothesis == MealHypothesis.COMMITTED) {
+                            val eventualBg = it.eventualBG ?: glucoseStatus.glucose
+                            val overshoot = (eventualBg - targetBg).coerceAtLeast(0.0)
+                            val actualDose = d.phase3.finalDose
+                            val fixedScale = BoostOvershootGuardShadow.guardScale(overshoot, BoostOvershootGuardShadow.FIXED)
+                            it.reason.append(
+                                "overshootGuardFixedShadow=${Round.roundTo(overshoot, 0.1)},${Round.roundTo(fixedScale, 0.001)}," +
+                                    "${Round.roundTo(actualDose, 0.001)},${Round.roundTo(actualDose * fixedScale, 0.001)}; "
+                            )
+                            val computedCoeffs = overshootCoeffsComputedCached
+                            if (computedCoeffs != null) {
+                                val computedScale = BoostOvershootGuardShadow.guardScale(overshoot, computedCoeffs)
+                                it.reason.append(
+                                    "overshootGuardComputedShadow=${Round.roundTo(overshoot, 0.1)},${Round.roundTo(computedScale, 0.001)}," +
+                                        "${Round.roundTo(actualDose, 0.001)},${Round.roundTo(actualDose * computedScale, 0.001)}," +
+                                        "${Round.roundTo(computedCoeffs.base, 0.01)},${Round.roundTo(computedCoeffs.normalizationMgdl, 0.1)}; "
+                                )
+                            } else {
+                                it.reason.append("overshootGuardComputedShadow=n/a; ")
+                            }
+                        }
+                    }
+                }.onFailure { t -> aapsLogger.error(LTag.APS, "Overshoot-guard shadow failed (swallowed — dosing untouched)", t) }
+            }
             // Sleep gate (2026-06-14): do NOT let V5 drive the SMB while SLEEPING — fall back to V1's
             // (oref1/Boost) SMB, which already respects night mode. V5 still computes its shadow
             // telemetry above (runShadow ran), so the V5-vs-V1 comparison continues overnight; only
@@ -2657,6 +2788,12 @@ open class OpenAPSBoostPlugin @Inject constructor(
     @Volatile private var floorSlewSuggestionCached: BoostFloorSlewShadow.Suggestion? = null
     private val floorSlewRecomputeIntervalMs = 30 * 60_000L
 
+    // Overshoot-guard COMPUTED-variant cache (2026-08-27, Konzept 10) — same throttle reasoning as
+    // Floor/Slew above (14d APSResult DB query, too heavy for every 5-min cycle).
+    @Volatile private var lastOvershootGuardComputeMs: Long = 0L
+    @Volatile private var overshootCoeffsComputedCached: BoostOvershootGuardShadow.Coefficients? = null
+    private val overshootGuardRecomputeIntervalMs = 30 * 60_000L
+
     // ---- Sleep state (2026-06-02) ----
     // Updated at end of invoke() once HR + steps + mlMealLikely are known. Read by
     // isNightModeActiveImpl() when ApsBoostNightModeAutoBySleep is enabled.
@@ -2882,6 +3019,14 @@ open class OpenAPSBoostPlugin @Inject constructor(
                 summary = rh.gs(R.string.boost_floor_slew_shadow_summary)
                 addPreference(AdaptiveSwitchPreference(ctx = context, booleanKey = BooleanKey.ApsBoostFloorSlewShadowEnabled, summary = R.string.boost_floor_slew_shadow_enabled_summary, title = R.string.boost_floor_slew_shadow_enabled_title))
                 addPreference(AdaptiveDoublePreference(ctx = context, doubleKey = DoubleKey.ApsBoostFloorSlewAggressiveness, dialogMessage = R.string.boost_floor_slew_aggressiveness_summary, title = R.string.boost_floor_slew_aggressiveness_title))
+            })
+
+            // ── 3c. Post-Meal Peak Shadow (Konzept 10, 2026-08-27) ────────
+            addPreference(preferenceManager.createPreferenceScreen(context).apply {
+                key = "boost_peak_shadow_settings"
+                title = rh.gs(R.string.boost_peak_shadow_title)
+                summary = rh.gs(R.string.boost_peak_shadow_summary)
+                addPreference(AdaptiveSwitchPreference(ctx = context, booleanKey = BooleanKey.ApsBoostPeakShadowCandidatesEnabled, summary = R.string.boost_peak_shadow_enabled_summary, title = R.string.boost_peak_shadow_enabled_title))
             })
 
             // ── 4. Exercise Settings (parent with nested sub-screens) ────
