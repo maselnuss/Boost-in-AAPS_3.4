@@ -11,6 +11,7 @@ import android.widget.CheckBox
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
+import android.widget.Toast
 import androidx.preference.PreferenceCategory
 import androidx.preference.PreferenceFragmentCompat
 import androidx.preference.PreferenceManager
@@ -739,7 +740,11 @@ open class OpenAPSBoostV5Plugin @Inject constructor(
     private fun showRestoreBackupDialog(context: Context) {
         val snapshots = BoostV5AutoConfigBackup.parseSnapshots(preferences.get(StringNonKey.ApsBoostV5AutoConfigBackup))
         if (snapshots.isEmpty()) {
-            uiInteraction.addNotification(Notification.USER_MESSAGE, rh.gs(R.string.boost_v5_restore_backup_none), Notification.INFO)
+            // Toast, not addNotification (2026-08-27, user feedback: "dann weiss der user direkt
+            // bescheid" — same pattern as HealthConnectPermissionActivity): addNotification surfaces
+            // on the Overview tab, invisible from here in Settings where the tap just happened —
+            // looked like the button did nothing. A Toast shows immediately, right on this screen.
+            Toast.makeText(context, rh.gs(R.string.boost_v5_restore_backup_none), Toast.LENGTH_LONG).show()
             return
         }
         fun triggerLabel(t: String) = if (t == "autoConfig") rh.gs(R.string.boost_v5_restore_backup_trigger_autoconfig) else rh.gs(R.string.boost_v5_restore_backup_trigger_periodic_review)
@@ -853,11 +858,10 @@ open class OpenAPSBoostV5Plugin @Inject constructor(
                         preferences.put(StringNonKey.ApsBoostV5AutoConfigBackup, BoostV5AutoConfigBackup.consume(currentBlob, currentIndex))
                     }
                     aapsLogger.info(LTag.APS, "BoostV5 auto-config: restored $applied item(s) from backup ${dateUtil.dateAndTimeString(snap.atMs)} (${snap.trigger})")
-                    uiInteraction.addNotification(
-                        Notification.USER_MESSAGE,
-                        rh.gs(R.string.boost_v5_restore_backup_done_toast, dateUtil.dateAndTimeString(snap.atMs)),
-                        Notification.INFO
-                    )
+                    // Toast, not addNotification — same reasoning as the empty-backup message above:
+                    // this is a direct result of a Settings-screen tap, immediate feedback belongs
+                    // right here, not on the Overview tab.
+                    Toast.makeText(context, rh.gs(R.string.boost_v5_restore_backup_done_toast, dateUtil.dateAndTimeString(snap.atMs)), Toast.LENGTH_LONG).show()
                 }
                 dialog.dismiss()
             }
@@ -1262,23 +1266,26 @@ open class OpenAPSBoostV5Plugin @Inject constructor(
                 addPreference(AdaptiveUnitPreference(ctx = context, unitKey = UnitDoubleKey.ApsBoostAlcoholHyperBrakeThreshold, dialogMessage = R.string.boost_alcohol_hyper_brake_threshold_summary, title = R.string.boost_alcohol_hyper_brake_threshold_title))
                 addPreference(AdaptiveDoublePreference(ctx = context, doubleKey = DoubleKey.ApsBoostAlcoholLowIobThreshold, dialogMessage = R.string.boost_alcohol_low_iob_threshold_summary, title = R.string.boost_alcohol_low_iob_threshold_title))
             })
-            // Undo safety net (2026-08-27, user request) — restore the managed knobs to their
-            // state from immediately before the last (or 2nd-last) automatic AutoConfig/Periodic
-            // Review apply. Last in Advanced deliberately: a maintenance-style action, not a
-            // tunable knob, so it doesn't sit between dosing settings. See BoostV5AutoConfigBackup.
-            addPreference(androidx.preference.Preference(context).apply {
-                key = "boost_v5_autoconfig_restore_backup"
-                title = rh.gs(R.string.boost_v5_restore_backup_title)
-                summary = rh.gs(R.string.boost_v5_restore_backup_summary)
-                setOnPreferenceClickListener {
-                    showRestoreBackupDialog(context)
-                    true
-                }
-            })
         }
         // Shared engine settings nested under Advanced. includeEngineEssentials = false: the
         // 6 essentials above are NOT repeated inside the engine sub-screens (no duplicate keys).
         openAPSBoostEngine.get().addBoostEngineCategories(preferenceManager, advanced, context, includeEngineEssentials = false)
+        // Undo safety net (2026-08-27, user request) — restore the managed knobs to their state
+        // from immediately before the last (or 2nd-last) automatic AutoConfig/Periodic Review
+        // apply. Added AFTER addBoostEngineCategories (2026-08-27, corrected — was previously
+        // added before it, which left the whole shared-engine category tree rendered below it,
+        // not "ganz ans Ende" as intended) so it's genuinely the last item in Advanced: a
+        // maintenance-style action, not a tunable knob, belongs at the very bottom. See
+        // BoostV5AutoConfigBackup.
+        advanced.addPreference(androidx.preference.Preference(context).apply {
+            key = "boost_v5_autoconfig_restore_backup"
+            title = rh.gs(R.string.boost_v5_restore_backup_title)
+            summary = rh.gs(R.string.boost_v5_restore_backup_summary)
+            setOnPreferenceClickListener {
+                showRestoreBackupDialog(context)
+                true
+            }
+        })
         category.addPreference(advanced)
     }
 }
