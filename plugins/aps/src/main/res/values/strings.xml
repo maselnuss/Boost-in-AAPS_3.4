@@ -162,6 +162,15 @@
     <string name="boost_v5_periodic_review_applied_toast">Boost V6 review: updated %1$d setting(s).</string>
     <string name="boost_v5_periodic_review_skipped_stale_toast">Boost V6 review: skipped %1$d setting(s) that changed since this review was computed — re-open Review to reconsider them.</string>
 
+    <string name="boost_v5_restore_backup_title">Restore previous AutoConfig values</string>
+    <string name="boost_v5_restore_backup_summary" formatted="false">Undo the last (or 2nd-last) automatic AutoConfig/Periodic Review change — restores the affected settings to what they were right before that apply.</string>
+    <string name="boost_v5_restore_backup_none">No previous AutoConfig backup available yet — nothing has been auto-applied so far.</string>
+    <string name="boost_v5_restore_backup_dialog_title">Restore which state?</string>
+    <string name="boost_v5_restore_backup_items_dialog_title">Select which values to restore</string>
+    <string name="boost_v5_restore_backup_trigger_autoconfig">initial AutoConfig</string>
+    <string name="boost_v5_restore_backup_trigger_periodic_review">Periodic Review</string>
+    <string name="boost_v5_restore_backup_done_toast">Boost V6: restored settings to the state from %1$s.</string>
+
     <!-- Boost Preference Screen Sections -->
     <string name="boost_settings_default_aaps">Default AAPS Settings</string>
     <string name="boost_settings_boost_controls">Boost Controls</string>

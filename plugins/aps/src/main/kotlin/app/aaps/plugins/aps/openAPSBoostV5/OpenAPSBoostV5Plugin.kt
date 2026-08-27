@@ -43,6 +43,7 @@ import app.aaps.core.keys.BooleanKey
 import app.aaps.core.keys.DoubleKey
 import app.aaps.core.keys.IntNonKey
 import app.aaps.core.keys.LongNonKey
+import app.aaps.core.keys.StringNonKey
 import app.aaps.core.keys.UnitDoubleKey
 import app.aaps.core.keys.interfaces.Preferences
 import app.aaps.core.ui.dialogs.AlertDialogHelper
@@ -346,6 +347,12 @@ open class OpenAPSBoostV5Plugin @Inject constructor(
             return
         }
 
+        // Undo safety net (2026-08-27): capture what every managed knob holds RIGHT NOW, before
+        // anything below writes to it. Cheap (in-memory prefs cache) — filtered down to only the
+        // knobs actually touched this cycle once that's known, a few lines down.
+        val beforeDoubles = BoostV5AutoConfigApply.managedDoubleKeys.associateWith { preferences.getIfExists(it) ?: it.defaultValue }
+        val beforeBooleans = managedBooleanKeys.associateWith { preferences.getIfExists(it) ?: it.defaultValue }
+
         // Apply only knobs the user (or a preset) hasn't TUNED (stored value differs from EVERY
         // factory default the key ever shipped with). Per-knob & independent — a tuned value is
         // KEPT and never blocks the others; each knob resolves (applied / kept-user-tuned /
@@ -363,20 +370,34 @@ open class OpenAPSBoostV5Plugin @Inject constructor(
         )
         // Log every classification verbatim so field diagnosis never needs inference.
         resolutions.forEach { aapsLogger.info(LTag.APS, "BoostV5 auto-config: ${it.key.key} → ${it.reason}") }
-        val applied = resolutions.filter { it.outcome == BoostV5AutoConfigApply.Outcome.APPLIED }
-            .map { "${shortName(it.key)}=${it.suggestedValue}" }.toMutableList()
+        val appliedResolutions = resolutions.filter { it.outcome == BoostV5AutoConfigApply.Outcome.APPLIED }
+        val appliedDoubleKeys = appliedResolutions.map { it.key }
+        val applied = appliedResolutions.map { "${shortName(it.key)}=${it.suggestedValue}" }.toMutableList()
         // Boolean managed keys. 2026-07-17 convention: every new dosing switch is auto-config managed
         // (not shipped OFF-for-everyone requiring manual discovery). Same suggestion-only, per-key,
         // resolve-once semantics as the double knobs — write only a key still at a factory default.
+        val appliedBooleanKeys = mutableListOf<BooleanKey>()
         for (bk in managedBooleanKeys) {
             if (isResolved(bk.key)) continue
             val value = suggestionBoolean(suggestion, bk)
             val stored = preferences.getIfExists(bk)
             if (stored == null || stored == bk.defaultValue) {
                 preferences.put(bk, value)
-                if (value != bk.defaultValue) applied += "${bk.name.removePrefix("ApsBoostV5")}=$value"
+                if (value != bk.defaultValue) {
+                    applied += "${bk.name.removePrefix("ApsBoostV5")}=$value"
+                    appliedBooleanKeys += bk
+                }
             }
             markResolved(bk.key)
+        }
+        if (appliedDoubleKeys.isNotEmpty() || appliedBooleanKeys.isNotEmpty()) {
+            val snapshot = BoostV5AutoConfigBackup.Snapshot(
+                atMs = dateUtil.now(),
+                trigger = "autoConfig",
+                doubles = appliedDoubleKeys.associateWith { beforeDoubles.getValue(it) },
+                booleans = appliedBooleanKeys.associateWith { beforeBooleans.getValue(it) }
+            )
+            preferences.put(StringNonKey.ApsBoostV5AutoConfigBackup, BoostV5AutoConfigBackup.pushSnapshot(preferences.get(StringNonKey.ApsBoostV5AutoConfigBackup), snapshot))
         }
 
         aapsLogger.info(LTag.APS, "BoostV5 auto-config applied [$applied]; rationale: ${suggestion.rationale}")
@@ -629,6 +650,10 @@ open class OpenAPSBoostV5Plugin @Inject constructor(
         fun applySelections(doubleIndices: List<Int>, booleanIndices: List<Int>) {
             var applied = 0
             var skippedStale = 0
+            // Undo safety net (2026-08-27): the "live" value re-read below for the staleness check
+            // IS the value right before it gets overwritten — reuse it as the backup, no extra read.
+            val beforeDoubles = mutableMapOf<DoubleKey, Double>()
+            val beforeBooleans = mutableMapOf<BooleanKey, Boolean>()
             for (i in doubleIndices) {
                 val item = doubleItems[i]
                 val live = preferences.getIfExists(item.key) ?: item.key.defaultValue
@@ -642,6 +667,7 @@ open class OpenAPSBoostV5Plugin @Inject constructor(
                     continue
                 }
                 preferences.put(item.key, item.suggestedValue)
+                beforeDoubles[item.key] = live
                 applied++
             }
             for (i in booleanIndices) {
@@ -657,7 +683,17 @@ open class OpenAPSBoostV5Plugin @Inject constructor(
                     continue
                 }
                 preferences.put(item.key, item.suggestedValue)
+                beforeBooleans[item.key] = live
                 applied++
+            }
+            if (beforeDoubles.isNotEmpty() || beforeBooleans.isNotEmpty()) {
+                val snapshot = BoostV5AutoConfigBackup.Snapshot(
+                    atMs = dateUtil.now(),
+                    trigger = "periodicReview",
+                    doubles = beforeDoubles,
+                    booleans = beforeBooleans
+                )
+                preferences.put(StringNonKey.ApsBoostV5AutoConfigBackup, BoostV5AutoConfigBackup.pushSnapshot(preferences.get(StringNonKey.ApsBoostV5AutoConfigBackup), snapshot))
             }
             if (applied > 0) aapsLogger.info(LTag.APS, "BoostV5 periodic review: applied $applied item(s)")
             // ONE addNotification call, not two: Notification.USER_MESSAGE is a shared/generic id
@@ -686,6 +722,146 @@ open class OpenAPSBoostV5Plugin @Inject constructor(
                 dialog.dismiss()
             }
             .setNegativeButton(rh.gs(R.string.boost_v5_periodic_review_discard)) { dialog, _ -> dialog.dismiss() }
+            .show()
+    }
+
+    /**
+     * Undo safety net (2026-08-27, user request: "was, wenn ich mich bei der Übernahme komplett
+     * verschätzt habe?") — lets the user step the managed knobs back to their state from
+     * immediately before the last (or 2nd-last) automatic apply, one-shot AutoConfig or Periodic
+     * Review alike. See [BoostV5AutoConfigBackup] for the pure push/parse/consume logic and why
+     * 2 slots, not 1 (a missed 14-day review cycle can mean two applies land unseen).
+     *
+     * Deliberately a plain tap-to-restore list (no extra confirm step): with only ever ≤2 entries,
+     * each labelled with its own date/trigger/changed-values, the label itself IS the confirmation
+     * — an extra dialog-on-dialog would only add friction to what's meant to be a quick undo.
+     */
+    private fun showRestoreBackupDialog(context: Context) {
+        val snapshots = BoostV5AutoConfigBackup.parseSnapshots(preferences.get(StringNonKey.ApsBoostV5AutoConfigBackup))
+        if (snapshots.isEmpty()) {
+            uiInteraction.addNotification(Notification.USER_MESSAGE, rh.gs(R.string.boost_v5_restore_backup_none), Notification.INFO)
+            return
+        }
+        fun triggerLabel(t: String) = if (t == "autoConfig") rh.gs(R.string.boost_v5_restore_backup_trigger_autoconfig) else rh.gs(R.string.boost_v5_restore_backup_trigger_periodic_review)
+        val labels = snapshots.map { snap ->
+            val changes = (snap.doubles.map { "${shortName(it.key)}=${it.value}" } + snap.booleans.map { "${shortName(it.key)}=${it.value}" })
+                .joinToString(", ")
+            "${dateUtil.dateAndTimeString(snap.atMs)} (${triggerLabel(snap.trigger)})\n$changes"
+        }.toTypedArray()
+
+        MaterialAlertDialogBuilder(context, app.aaps.core.ui.R.style.DialogTheme)
+            .setCustomTitle(AlertDialogHelper.buildCustomTitle(context, rh.gs(R.string.boost_v5_restore_backup_dialog_title)))
+            .setItems(labels) { dialog, which ->
+                dialog.dismiss()
+                showRestoreItemsDialog(context, snapshots[which])
+            }
+            .setNegativeButton(app.aaps.core.ui.R.string.cancel) { dialog, _ -> dialog.dismiss() }
+            .show()
+    }
+
+    /**
+     * Step 2 of the restore flow (2026-08-27, user request: "immer nur gewissen teile" — per-knob
+     * selection, not all-or-nothing) — same checkbox-row style as [showPeriodicReviewDialog]: every
+     * changed knob from [snap] gets its own pre-checked box showing current → restore-to (same
+     * "$current → $suggested" convention as the review dialog, no new formatting). Only checked
+     * knobs are written back.
+     *
+     * The snapshot to consume is re-located by (atMs, trigger) in the CURRENT blob at apply-time,
+     * not by the index captured when the picker opened — a background auto-apply could in theory
+     * push a new entry while this dialog is open, shifting indices. If it's no longer found (already
+     * consumed some other way), the selected values are still applied — restoring settings is safe
+     * to do twice — just nothing is removed from the (now-different) backup list.
+     */
+    private fun showRestoreItemsDialog(context: Context, snap: BoostV5AutoConfigBackup.Snapshot) {
+        val density = context.resources.displayMetrics.density
+        fun dp(v: Int) = (v * density).toInt()
+        val container = LinearLayout(context).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(24), dp(8), dp(24), dp(8))
+        }
+        fun row(checkBox: CheckBox, name: String, valueText: String) {
+            val titleView = TextView(context).apply {
+                text = name
+                setTypeface(typeface, Typeface.BOLD)
+            }
+            val valueView = TextView(context).apply {
+                text = valueText
+                textSize = 13f
+                alpha = 0.7f
+                setPadding(0, dp(2), 0, 0)
+            }
+            val textColumn = LinearLayout(context).apply {
+                orientation = LinearLayout.VERTICAL
+                layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+                addView(titleView)
+                addView(valueView)
+            }
+            val rowLayout = LinearLayout(context).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.TOP
+                setPadding(0, dp(10), 0, dp(10))
+                addView(checkBox)
+                addView(textColumn)
+            }
+            container.addView(rowLayout)
+        }
+
+        val doubleKeys = snap.doubles.keys.toList()
+        val doubleCheckBoxes = doubleKeys.map { key ->
+            val checkBox = CheckBox(context).apply { isChecked = true }
+            val restoreTo = snap.doubles.getValue(key)
+            val current = preferences.getIfExists(key) ?: key.defaultValue
+            row(checkBox, shortName(key), "$current → $restoreTo")
+            checkBox
+        }
+        val booleanKeys = snap.booleans.keys.toList()
+        val booleanCheckBoxes = booleanKeys.map { key ->
+            val checkBox = CheckBox(context).apply { isChecked = true }
+            val restoreTo = snap.booleans.getValue(key)
+            val current = preferences.getIfExists(key) ?: key.defaultValue
+            row(checkBox, shortName(key), "${if (current) "ON" else "OFF"} → ${if (restoreTo) "ON" else "OFF"}")
+            checkBox
+        }
+
+        val scrollableContent = ScrollView(context).apply { addView(container) }
+
+        MaterialAlertDialogBuilder(context, app.aaps.core.ui.R.style.DialogTheme)
+            .setCustomTitle(AlertDialogHelper.buildCustomTitle(context, rh.gs(R.string.boost_v5_restore_backup_items_dialog_title)))
+            .setView(scrollableContent)
+            .setPositiveButton(rh.gs(R.string.boost_v5_periodic_review_apply_selected)) { dialog, _ ->
+                var applied = 0
+                doubleKeys.forEachIndexed { i, key ->
+                    if (doubleCheckBoxes[i].isChecked) {
+                        preferences.put(key, snap.doubles.getValue(key))
+                        applied++
+                    }
+                }
+                booleanKeys.forEachIndexed { i, key ->
+                    if (booleanCheckBoxes[i].isChecked) {
+                        preferences.put(key, snap.booleans.getValue(key))
+                        applied++
+                    }
+                }
+                // Only consume the backup slot (and toast success) if something was actually
+                // restored — everything unchecked + "Apply selected" must behave like Cancel, not
+                // silently burn one of only 2 precious backup slots for zero effect (found in
+                // review: the original version consumed unconditionally here).
+                if (applied > 0) {
+                    val currentBlob = preferences.get(StringNonKey.ApsBoostV5AutoConfigBackup)
+                    val currentIndex = BoostV5AutoConfigBackup.parseSnapshots(currentBlob).indexOfFirst { it.atMs == snap.atMs && it.trigger == snap.trigger }
+                    if (currentIndex >= 0) {
+                        preferences.put(StringNonKey.ApsBoostV5AutoConfigBackup, BoostV5AutoConfigBackup.consume(currentBlob, currentIndex))
+                    }
+                    aapsLogger.info(LTag.APS, "BoostV5 auto-config: restored $applied item(s) from backup ${dateUtil.dateAndTimeString(snap.atMs)} (${snap.trigger})")
+                    uiInteraction.addNotification(
+                        Notification.USER_MESSAGE,
+                        rh.gs(R.string.boost_v5_restore_backup_done_toast, dateUtil.dateAndTimeString(snap.atMs)),
+                        Notification.INFO
+                    )
+                }
+                dialog.dismiss()
+            }
+            .setNegativeButton(app.aaps.core.ui.R.string.cancel) { dialog, _ -> dialog.dismiss() }
             .show()
     }
 
@@ -1085,6 +1261,19 @@ open class OpenAPSBoostV5Plugin @Inject constructor(
                 addPreference(AdaptiveDoublePreference(ctx = context, doubleKey = DoubleKey.ApsBoostAlcoholHighMultiplier, dialogMessage = R.string.boost_alcohol_high_multiplier_summary, title = R.string.boost_alcohol_high_multiplier_title))
                 addPreference(AdaptiveUnitPreference(ctx = context, unitKey = UnitDoubleKey.ApsBoostAlcoholHyperBrakeThreshold, dialogMessage = R.string.boost_alcohol_hyper_brake_threshold_summary, title = R.string.boost_alcohol_hyper_brake_threshold_title))
                 addPreference(AdaptiveDoublePreference(ctx = context, doubleKey = DoubleKey.ApsBoostAlcoholLowIobThreshold, dialogMessage = R.string.boost_alcohol_low_iob_threshold_summary, title = R.string.boost_alcohol_low_iob_threshold_title))
+            })
+            // Undo safety net (2026-08-27, user request) — restore the managed knobs to their
+            // state from immediately before the last (or 2nd-last) automatic AutoConfig/Periodic
+            // Review apply. Last in Advanced deliberately: a maintenance-style action, not a
+            // tunable knob, so it doesn't sit between dosing settings. See BoostV5AutoConfigBackup.
+            addPreference(androidx.preference.Preference(context).apply {
+                key = "boost_v5_autoconfig_restore_backup"
+                title = rh.gs(R.string.boost_v5_restore_backup_title)
+                summary = rh.gs(R.string.boost_v5_restore_backup_summary)
+                setOnPreferenceClickListener {
+                    showRestoreBackupDialog(context)
+                    true
+                }
             })
         }
         // Shared engine settings nested under Advanced. includeEngineEssentials = false: the
