@@ -211,8 +211,8 @@ class MealTimeLearnerTest {
     }
 
     @Test fun `preMealWindow with nowDayType only fires for that day-type own mode, once Stage 1 confirmed`() {
-        // 2 of the 6 Sundays manually confirmed -> satisfies MIN_MANUAL_CONFIRMATION_DAYS(2).
-        val sundays = listOf(3L, 10L, 17L, 24L, 31L, 38L).mapIndexed { i, d -> ev(d, 780, manual = i < 2) }
+        // 4 of the 6 Sundays manually confirmed -> satisfies MIN_MANUAL_CONFIRMATION_DAYS(4).
+        val sundays = listOf(3L, 10L, 17L, 24L, 31L, 38L).mapIndexed { i, d -> ev(d, 780, manual = i < 4) }
         val saturdays = listOf(2L, 9L, 16L, 23L, 30L, 37L).map { ev(it, 790) }
         val h = MealTimeLearner.History((sundays + saturdays).toMutableList())
 
@@ -237,10 +237,10 @@ class MealTimeLearnerTest {
 
     @Test fun `exactly MIN_MANUAL_CONFIRMATION_DAYS is enough, one fewer is not`() {
         val sundaysDays = listOf(3L, 10L, 17L, 24L, 31L, 38L)
-        val oneConfirmed = MealTimeLearner.History(sundaysDays.mapIndexed { i, d -> ev(d, 780, manual = i < 1) }.toMutableList())
-        val twoConfirmed = MealTimeLearner.History(sundaysDays.mapIndexed { i, d -> ev(d, 780, manual = i < 2) }.toMutableList())
-        assertThat(MealTimeLearner.preMealWindow(oneConfirmed, 725, offset, 60, MealTimeLearner.DayType.SUNDAY)).isNull()
-        assertThat(MealTimeLearner.preMealWindow(twoConfirmed, 725, offset, 60, MealTimeLearner.DayType.SUNDAY)).isNotNull()
+        val threeConfirmed = MealTimeLearner.History(sundaysDays.mapIndexed { i, d -> ev(d, 780, manual = i < 3) }.toMutableList())
+        val fourConfirmed = MealTimeLearner.History(sundaysDays.mapIndexed { i, d -> ev(d, 780, manual = i < 4) }.toMutableList())
+        assertThat(MealTimeLearner.preMealWindow(threeConfirmed, 725, offset, 60, MealTimeLearner.DayType.SUNDAY)).isNull()
+        assertThat(MealTimeLearner.preMealWindow(fourConfirmed, 725, offset, 60, MealTimeLearner.DayType.SUNDAY)).isNotNull()
     }
 
     @Test fun `two manual taps on the SAME day count as one distinct day, not enough alone`() {

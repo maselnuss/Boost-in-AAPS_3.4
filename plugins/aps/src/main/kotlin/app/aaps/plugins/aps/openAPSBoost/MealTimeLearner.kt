@@ -96,8 +96,13 @@ object MealTimeLearner {
      *  close together; without this, each repeat tap would train the learner as its own event. */
     const val MIN_TAP_GAP_MIN = 15
 
-    /** Stage 1 trust gate (Konzept 6.2) — see class KDoc "Manual-confirmation trust gates". */
-    const val MIN_MANUAL_CONFIRMATION_DAYS = 2
+    /** Stage 1 trust gate (Konzept 6.2) — see class KDoc "Manual-confirmation trust gates".
+     *  2026-08-28: raised 2 → 4 (user decision, not backtest-calibrated like most constants in this
+     *  file). Deliberately set equal to [MIN_DISTINCT_DAYS]: the blind trigger should require at
+     *  least as much manual verification as it took to recognize the pattern automatically in the
+     *  first place — a mode barely at the MIN_DISTINCT_DAYS floor now needs ALL of its founding days
+     *  manually confirmed, not just half. */
+    const val MIN_MANUAL_CONFIRMATION_DAYS = 4
 
     /** Stage 2 graduation gates (Konzept 6.2) — see class KDoc. */
     const val GRADUATION_MIN_MANUAL_DAYS = 8
