@@ -940,6 +940,19 @@ open class OpenAPSBoostV5Plugin @Inject constructor(
             rT.boostV5_score = decision.score
             rT.boostV5_state = decision.mealHypothesis.name
             rT.boostV5_age = decision.mealHypothesisAge
+            // 2026-08-28 Aggressive Early Confirm SHADOW (Konzept 6.3, user request) — a parallel
+            // MealHypothesis computed every cycle in DetermineBasalBoostV5.decide() with the
+            // sustained-score early-confirm age gate shaved one cycle further
+            // (aggressiveEarlyConfirm forced true), UNCONDITIONALLY — regardless of whether the
+            // live ApsBoostV5AggressiveEarlyConfirm toggle is on or off, so the user can see what
+            // the setting would do without enabling it. Ride in [reason] as a "aggConfirmShadow=
+            // <state>,<age>;" tag, NOT a new RT field — see the RT.kt NOTE next to boostV5_smbVol60Min
+            // (adding fields to this class risks a VerifyError startup crash on the legacy V3MLG3
+            // path, reproduced 2026-07-18; same reason KAIROS Twin/recoveringShadow=/twin= all use
+            // reason-string tags instead of RT fields). Compare against boostV5_state/age (which DO
+            // stay RT fields — they predate the 2026-07-18 finding and are load-bearing elsewhere;
+            // not touched here) to see how much earlier the aggressive gate would have confirmed.
+            rT.reason.append("aggConfirmShadow=${decision.aggressiveConfirmShadowState.name},${decision.aggressiveConfirmShadowAge}; ")
             rT.boostV5_budget = decision.aggressionBudget.budget
             rT.boostV5_actionMult = decision.actionMultiplier
             rT.boostV5_finalDose = decision.finalDose

@@ -133,6 +133,10 @@ data class RT(
     // indistinguishable from a zero-dose decision. Written every Boost cycle at the override seam.
     var boostV5_cumulativeCapU: Double? = null,  // operative rolling-60-min cumulative SMB cap (U, ApsBoostCumulativeSmbCap60Min); 0 = cap disabled
     var boostV5_smbVol60Min: Double? = null,     // SMB volume delivered in the trailing 60 min (U) — the value the cap compares against (fail-closed: set AT cap on DB error)
+    // NOTE: Aggressive Early Confirm shadow (Konzept 6.3, 2026-08-28) deliberately does NOT add
+    // fields here — see the KAIROS Twin note below (adding ANY field to this class risks a
+    // VerifyError startup crash on the legacy V3MLG3 path). It rides in [reason] as an
+    // "aggConfirmShadow=...;" tag instead — see OpenAPSBoostV5Plugin.runShadow.
 
     // Boost V7 SHADOW telemetry (2026-07) — live instrument for the REVISED distributional-sizing
     // formulation after the offline NO-GO (backtesting/reports/2026-07_v7_foundation_REPORT.md §3:

@@ -81,8 +81,25 @@ class V5StateStore(private val preferences: Preferences, private val aapsLogger:
                 // state → default false (next session entry will reset it explicitly).
                 committedInSession = json.optBoolean("committedInSession", false),
             )
+            // 2026-08-28 Aggressive Early Confirm shadow: parallel hypothesis state, computed with
+            // aggressiveEarlyConfirm forced true regardless of the live toggle (see DetermineBasalBoostV5
+            // Konzept 6.3). Nested JSON object; missing entirely in pre-shadow persisted blobs → default
+            // to a fresh IDLE sub-state (safe: shadow just starts observing again, no live-dosing impact).
+            val shadowJson = json.optJSONObject("aggressiveConfirmShadow")
+            val aggressiveConfirmShadowState = if (shadowJson != null) {
+                MealHypothesisState(
+                    state = MealHypothesis.valueOf(shadowJson.getString("mealHypothesis")),
+                    ageCycles = shadowJson.getInt("mealHypothesisAge"),
+                    maxScoreInObserving = shadowJson.optDouble("maxScoreInObserving", 0.0),
+                    maxEventualBgOffsetInObserving = shadowJson.optDouble("maxEventualBgOffsetInObserving", 0.0),
+                    committedInSession = shadowJson.optBoolean("committedInSession", false),
+                )
+            } else {
+                MealHypothesisState()
+            }
             V5PersistedState(
                 mealHypothesis = state,
+                aggressiveConfirmShadowHypothesis = aggressiveConfirmShadowState,
                 mlMealLikelyNullStreak = json.optInt("mlMealLikelyNullStreak", 0),
                 // 2026-07-20 primer session accumulators: survive a mid-meal restart. Missing in
                 // pre-primer state → default 0.0 (safe: no primer credited, no netting owed).
@@ -118,6 +135,17 @@ class V5StateStore(private val preferences: Preferences, private val aapsLogger:
             .put("maxScoreInObserving", state.mealHypothesis.maxScoreInObserving)
             .put("maxEventualBgOffsetInObserving", state.mealHypothesis.maxEventualBgOffsetInObserving)
             .put("committedInSession", state.mealHypothesis.committedInSession)
+            // 2026-08-28 Aggressive Early Confirm shadow state — nested object, mirrors the real
+            // mealHypothesis fields above (see load() for the corresponding parse).
+            .put(
+                "aggressiveConfirmShadow",
+                JSONObject()
+                    .put("mealHypothesis", state.aggressiveConfirmShadowHypothesis.state.name)
+                    .put("mealHypothesisAge", state.aggressiveConfirmShadowHypothesis.ageCycles)
+                    .put("maxScoreInObserving", state.aggressiveConfirmShadowHypothesis.maxScoreInObserving)
+                    .put("maxEventualBgOffsetInObserving", state.aggressiveConfirmShadowHypothesis.maxEventualBgOffsetInObserving)
+                    .put("committedInSession", state.aggressiveConfirmShadowHypothesis.committedInSession)
+            )
             .put("mlMealLikelyNullStreak", state.mlMealLikelyNullStreak)
             .put("primerAppliedU", state.primerAppliedU)                     // 2026-07-20 primer session state
             .put("primerNettingResidualU", state.primerNettingResidualU)

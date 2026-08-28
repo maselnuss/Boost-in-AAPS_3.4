@@ -152,6 +152,12 @@ data class V5PersistedState(
     val primerIobU: Double = 0.0,
     /** 2026-07-21 primer: epoch-ms the accumulator was last updated (for the decay). 0 = never. */
     val primerIobUpdatedMs: Long = 0L,
+    /** 2026-08-28 (Konzept 6.3, "Aggressive Early Confirm" shadow) — a SECOND, fully independent
+     *  [MealHypothesisState] track that always runs [step] with `aggressiveEarlyConfirm = true`,
+     *  regardless of the live [BooleanKey.ApsBoostV5AggressiveEarlyConfirm] setting — so the user
+     *  can see what the timing WOULD have been with it on, without actually turning it on. See
+     *  the shadow step() call in [decide]. */
+    val aggressiveConfirmShadowHypothesis: MealHypothesisState = MealHypothesisState(),
 )
 
 /** Full per-cycle V5 output. Every field is reconstructable into the ~6 NS RT fields. */
@@ -201,6 +207,10 @@ data class V5Decision(
     val primerBolusU: Double = 0.0,
     /** 2026-07-20 primer delivery mode (pass-through for the seam): true = temp-basal, false = bolus. */
     val primerUseTempBasal: Boolean = false,
+    /** 2026-08-28 (Konzept 6.3) — Aggressive Early Confirm SHADOW result this cycle. See the
+     *  shadow step() call in [decide]. READ-ONLY, never affects dosing. */
+    val aggressiveConfirmShadowState: MealHypothesis = MealHypothesis.IDLE,
+    val aggressiveConfirmShadowAge: Int = 0,
 )
 
 // ===== 2026-07-20 V1-acceleration early primer (LIVE) — backtesting/scripts/2026-07-v1-acceleration =====
@@ -318,6 +328,39 @@ class DetermineBasalBoostV5 @Inject constructor() {
             confirmDoseAdequate = confirmDoseAdequate,
             scoreReadyStreak = scoreReadyStreak,   // 2026-07-03 sustained-score early confirm (hoisted above)
             aggressiveEarlyConfirm = inputs.aggressiveEarlyConfirmEnabled,   // 2026-07-17 opt-in age −2
+        )
+
+        // 2026-08-28 (Konzept 6.3) — Aggressive Early Confirm SHADOW: a fully independent second
+        // run of the SAME step(), differing ONLY in aggressiveEarlyConfirm being forced true,
+        // regardless of the live ApsBoostV5AggressiveEarlyConfirm setting — so its timing can be
+        // evaluated without actually turning the real one on. Reuses every other real input
+        // (score, deltas, scoreReadyStreak, confirmDoseAdequate, ...) — those reflect actual BG
+        // data, not the toggle, so they must be identical between the real and shadow runs; only
+        // the age-gate policy the toggle controls should differ. Reset with the SAME triggers as
+        // the real track (reboot-equivalents apply equally to both). READ-ONLY — this state is
+        // never fed into finalDose/insulinToDeliver, only threaded through to newPersistedState
+        // for the next cycle and exposed on V5Decision for the plugin to log.
+        val (shadowResetState, _) = resetIfNeeded(
+            current = persisted.aggressiveConfirmShadowHypothesis,
+            profileSwitched = inputs.profileSwitched,
+            pumpDisconnected = inputs.pumpDisconnected,
+            loopSuspended = inputs.loopSuspended,
+            timeJumpMinutes = inputs.timeJumpMinutes,
+        )
+        val aggressiveConfirmShadowState = step(
+            current = shadowResetState,
+            score = scoreResult.score,
+            eventualBg = inputs.eventualBg,
+            targetBg = inputs.targetBg,
+            delta = inputs.delta,
+            deltaAccl = inputs.deltaAccl,
+            deltaDeclining = deltaDeclining(inputs.deltaHistory, windowCycles = 2),
+            asleep = inputs.asleep,
+            exerciseActive = inputs.exerciseActive,
+            fastConfirmEnabled = fastConfirmAllowed(inputs.fastCarbConfirmEnabled, inputs.recentLowBg),
+            confirmDoseAdequate = confirmDoseAdequate,
+            scoreReadyStreak = scoreReadyStreak,
+            aggressiveEarlyConfirm = true,   // forced, regardless of the live setting
         )
 
         // ===== 2026-07-20 V1-acceleration early primer (LIVE) — see PRIMER_* + REINTEGRATION_SPEC =====
@@ -531,6 +574,7 @@ class DetermineBasalBoostV5 @Inject constructor() {
                 primerNettingResidualU = primerNettingResidualU,
                 primerIobU = primerIobU,
                 primerIobUpdatedMs = primerIobUpdatedMs,
+                aggressiveConfirmShadowHypothesis = aggressiveConfirmShadowState,
             ),
             confirmGate = confirmGate,
             prospectiveConfirmShot = prospectiveConfirmShot,
@@ -539,6 +583,8 @@ class DetermineBasalBoostV5 @Inject constructor() {
             velocityBudgetExempt = velocityBudgetExempt,
             primerBolusU = primerBolusU,
             primerUseTempBasal = inputs.primerUseTempBasal,
+            aggressiveConfirmShadowState = aggressiveConfirmShadowState.state,
+            aggressiveConfirmShadowAge = aggressiveConfirmShadowState.ageCycles,
         )
     }
 }
