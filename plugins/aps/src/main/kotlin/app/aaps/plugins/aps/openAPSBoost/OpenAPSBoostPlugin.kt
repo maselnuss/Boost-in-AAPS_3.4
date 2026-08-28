@@ -1463,7 +1463,10 @@ open class OpenAPSBoostPlugin @Inject constructor(
             // Sunday-only ~13:00 pattern isn't diluted by unrelated weekday events. Same (now, offsetMs)
             // arithmetic MealTimeLearner uses internally for historical events — always consistent.
             val nowDayType = MealTimeLearner.dayTypeOf(now, offsetMs)
-            val learnedHit = MealTimeLearner.preMealWindow(mealTimeHistoryCached, nowMin, offsetMs, leadMaxMin, nowDayType)
+            val learnedHit = MealTimeLearner.preMealWindow(
+                mealTimeHistoryCached, nowMin, offsetMs, leadMaxMin, nowDayType,
+                graduationState = mealTimeGraduationCached, nowMs = now,
+            )
 
             // Manual MEAL tap (Konzept 6). Recording into History happens UNCONDITIONALLY — it's a
             // pure training-signal/data-collection concern, independent of whether exercise below
@@ -1472,7 +1475,7 @@ open class OpenAPSBoostPlugin @Inject constructor(
             // would reset to "never recorded" after an app/process restart and re-record the same old
             // tap as a fresh duplicate event on the first cycle after restart.
             val lastMealTapMs = preferences.get(LongNonKey.ApsBoostLastMealTapMs)
-            if (lastMealTapMs > 0 && lastMealTapMs !in mealTimeHistoryCached.events) {
+            if (lastMealTapMs > 0 && mealTimeHistoryCached.events.none { it.tsMs == lastMealTapMs }) {
                 // Accidental-repeat-tap guard (2026-08-26, user question): the exact-timestamp dedup
                 // above only stops the SAME tap being re-recorded on a later cycle — it does nothing
                 // for a genuinely new (different ms) tap seconds/minutes after the last one, e.g. a
@@ -1480,23 +1483,41 @@ open class OpenAPSBoostPlugin @Inject constructor(
                 // distinct meal event. Proximity check against the whole history, not just the last
                 // entry, since events aren't guaranteed sorted.
                 val tooSoonAfterLastRecordedEvent = mealTimeHistoryCached.events.any {
-                    kotlin.math.abs(it - lastMealTapMs) < MealTimeLearner.MIN_TAP_GAP_MIN * 60_000L
+                    kotlin.math.abs(it.tsMs - lastMealTapMs) < MealTimeLearner.MIN_TAP_GAP_MIN * 60_000L
                 }
                 if (tooSoonAfterLastRecordedEvent) {
                     aapsLogger.debug(LTag.APS, "V6 meal-time learner: ignored tap @ ${dateUtil.dateAndTimeString(lastMealTapMs)} — within ${MealTimeLearner.MIN_TAP_GAP_MIN}min of an already-recorded event (treated as accidental repeat, not a new meal)")
                 } else {
-                    mealTimeHistoryCached = MealTimeLearner.record(mealTimeHistoryCached, lastMealTapMs)
+                    mealTimeHistoryCached = MealTimeLearner.record(mealTimeHistoryCached, lastMealTapMs, manual = true)
                     preferences.put(StringKey.ApsBoostMealTimeHistory, mealTimeHistoryCached.serialize())
                     aapsLogger.debug(LTag.APS, "V6 meal-time learner: recorded MANUAL tap @ ${dateUtil.dateAndTimeString(lastMealTapMs)} (${mealTimeHistoryCached.events.size} events)")
+                    // Stage 2 graduation progress (Konzept 6.2): attribute this tap to whichever mode
+                    // it just clustered into (if any yet exists for this day-type) and record the
+                    // day's contribution — independent of whether Stage 1 already passes; graduation
+                    // accumulates from the first confirmed day, not only once trust is already granted.
+                    val tapDayType = MealTimeLearner.dayTypeOf(lastMealTapMs, offsetMs)
+                    val tapMinOfDay = SleepHistoryTracker.msToMinOfDay(lastMealTapMs, offsetMs)
+                    val tapDayIndex = (lastMealTapMs + offsetMs) / (24L * 60L * 60L * 1000L)
+                    val tapModes = MealTimeLearner.modesByDayType(mealTimeHistoryCached, offsetMs)[tapDayType].orEmpty()
+                    MealTimeLearner.modeNear(tapModes, tapMinOfDay)?.let { mode ->
+                        val key = MealTimeLearner.modeKeyOf(tapDayType, mode.centreMin)
+                        mealTimeGraduationCached = MealTimeLearner.recordGraduationProgress(mealTimeGraduationCached, key, tapDayIndex, now)
+                        preferences.put(StringKey.ApsBoostMealTimeGraduation, mealTimeGraduationCached.serialize())
+                    }
                 }
             }
             val tapAgeMin = manualTapAgeMin(now, lastMealTapMs)
             val isManualTapActive = manualTapActive(now, lastMealTapMs)
 
+            // Cancel-notification override (Konzept 6.2, 2026-08-28): suppresses ONLY the AUTO/
+            // learned trigger (never a manual tap — a tap right after cancelling is an explicit
+            // "actually, I am eating" override in the other direction and must still work).
+            val isPreMealCancelled = now < preferences.get(LongNonKey.ApsBoostPreMealCancelledUntilMs)
+            val firedViaLearnedHit = learnedHit != null && !isPreMealCancelled
             val triggerDesc = when {
-                learnedHit != null  -> "learned ~${formatClockMin(learnedHit.mode.centreMin)}, ${learnedHit.minutesBeforeMeal}min before, ${learnedHit.mode.distinctDays}d"
-                isManualTapActive   -> "manual tap ${tapAgeMin}min ago"
-                else                -> return@run
+                firedViaLearnedHit -> "learned ~${formatClockMin(learnedHit!!.mode.centreMin)}, ${learnedHit!!.minutesBeforeMeal}min before, ${learnedHit!!.mode.distinctDays}d"
+                isManualTapActive  -> "manual tap ${tapAgeMin}min ago"
+                else               -> return@run
             }
             val exerciseNow = activityResult.activityState in setOf("ACTIVE", "VIGOROUS_AEROBIC", "MODERATE_AEROBIC", "LIGHT_AEROBIC", "RESISTANCE", "STRESS")
             val inRecovery = postExerciseRecoveryEnabled && now < recoveryWindowEnd
@@ -1518,6 +1539,40 @@ open class OpenAPSBoostPlugin @Inject constructor(
                     v6MinBg = shadowMinBg
                     v6MaxBg = shadowMaxBg
                     v6TargetBg = shadowTargetBg
+                    // Cancel-notification (Konzept 6.2, 2026-08-28): only for the AUTO/learned
+                    // trigger (manual taps are already an explicit user action, nothing to offer
+                    // to cancel) and only once per fresh occurrence — deduped by (mode, day), not
+                    // re-fired every cycle while the same window stays open. Swipe-away = no
+                    // action = pre-meal target stays active (the statistically correct default —
+                    // most occurrences are genuine); the Cancel button is the only thing that
+                    // suppresses it, via ApsBoostPreMealCancelledUntilMs.
+                    if (firedViaLearnedHit) {
+                        // Refreshed EVERY cycle (not deduped like the notification below) — see
+                        // BoostOverviewV2Fragment.kt: while this stays fresh, the MEAL button
+                        // switches to "Cancel" mode. This is now the ONLY cancel action — see the
+                        // 2026-08-28 fix below for why the notification itself doesn't carry one.
+                        preferences.put(LongNonKey.ApsBoostPreMealWindowActiveUntilMs, now + 10 * 60_000L)
+                        val occurrenceKey = "${MealTimeLearner.modeKeyOf(nowDayType, learnedHit!!.mode.centreMin).serialize()}:${(now + offsetMs) / (24L * 60L * 60L * 1000L)}"
+                        if (occurrenceKey != lastPreMealNotifiedOccurrence) {
+                            lastPreMealNotifiedOccurrence = occurrenceKey
+                            // 2026-08-28 fix (found on re-check, user question "does this come
+                            // through Android itself?"): NotificationStore.add() only calls
+                            // raiseSystemNotification() when `n !is NotificationWithAction` — ANY
+                            // notification built with an action button (the addNotification()
+                            // overload used previously here) is UNCONDITIONALLY excluded from ever
+                            // becoming a real Android system notification, regardless of the
+                            // AlertUrgentAsAndroidNotification setting. It was ALWAYS in-app-only,
+                            // never in the system tray, never watch-mirrored — contrary to what was
+                            // said earlier. Switched to the plain 3-arg addNotification() (no
+                            // action) specifically so it qualifies for a real system notification;
+                            // the MEAL button (see above) is now the sole cancel action instead.
+                            uiInteraction.addNotification(
+                                Notification.BOOST_V6_PREMEAL_CANCEL,
+                                "Boost: pre-meal target lowered to ${preMealTarget.toInt()} for your usual ~${formatClockMin(learnedHit!!.mode.centreMin)} meal. Not eating this time? Open the app — the MEAL button shows Cancel while this is active.",
+                                Notification.INFO
+                            )
+                        }
+                    }
                     "V6 pre-meal ACTIVE target=${preMealTarget.toInt()} ($triggerDesc); "
                 } else {
                     "V6 pre-meal skipped (target ${preMealTarget.toInt()} ≥ current ${v6TargetBg.toInt()}); "
@@ -2341,7 +2396,7 @@ open class OpenAPSBoostPlugin @Inject constructor(
             // V6 meal-time learner: record a FRESH CONFIRMED commit (the event V5 treats as a meal)
             // so the pre-meal window learns this user's habitual meal times. Persist only on change.
             if (v5decision != null && v5decision.mealHypothesis == MealHypothesis.CONFIRMED && v5decision.mealHypothesisAge == 0) {
-                mealTimeHistoryCached = MealTimeLearner.record(mealTimeHistoryCached, now)
+                mealTimeHistoryCached = MealTimeLearner.record(mealTimeHistoryCached, now, manual = false)
                 preferences.put(StringKey.ApsBoostMealTimeHistory, mealTimeHistoryCached.serialize())
                 aapsLogger.debug(LTag.APS, "V6 meal-time learner: recorded CONFIRMED @ ${dateUtil.dateAndTimeString(now)} (${mealTimeHistoryCached.events.size} events)")
             }
@@ -2805,6 +2860,14 @@ open class OpenAPSBoostPlugin @Inject constructor(
     // construction; updated at end of invoke() when a fresh CONFIRMED fires, persisted on change.
     @Volatile private var mealTimeHistoryCached: MealTimeLearner.History =
         MealTimeLearner.History.deserialize(preferences.getBoostDosing(StringKey.ApsBoostMealTimeHistory))
+    // Konzept 6.2 (2026-08-28) — Stage 2 graduation progress, see StringKey.ApsBoostMealTimeGraduation.
+    @Volatile private var mealTimeGraduationCached: MealTimeLearner.GraduationState =
+        MealTimeLearner.GraduationState.deserialize(preferences.getBoostDosing(StringKey.ApsBoostMealTimeGraduation))
+    // Konzept 6.2 (2026-08-28) — dedupes the pre-meal Cancel notification to once per (mode, day)
+    // occurrence, not once per 5-min cycle for as long as the window stays open. In-memory only
+    // (not persisted): worst case after a process restart is one duplicate notification, not a
+    // dosing-relevant miss — same tradeoff as other in-memory-only dedup markers in this file.
+    @Volatile private var lastPreMealNotifiedOccurrence: String? = null
     // Activity-load SHADOW — rolling 28-day PER-SOURCE daily-step history (multi-source abstraction
     // 2026-06-28; deserialize auto-migrates the old single-source blob). Persisted under the same key.
     @Volatile private var multiStepHistoryCached: DailyStepHistoryTracker.MultiSourceHistory =

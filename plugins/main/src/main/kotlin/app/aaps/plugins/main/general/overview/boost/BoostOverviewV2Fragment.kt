@@ -1081,6 +1081,15 @@ class BoostOverviewV2Fragment : DaggerFragment(), View.OnClickListener {
         binding.v2BtnMeal.visibility = preferences.get(BooleanKey.ApsBoostShowMealButton).toVisibility()
         binding.v2BtnAlcohol.visibility = preferences.get(BooleanKey.ApsBoostShowAlcoholButton).toVisibility()
 
+        // Konzept 6.2 (2026-08-28): while the Plugin's AUTO/learned pre-meal trigger is active, the
+        // MEAL button doubles as the Cancel action — the pre-meal notification has no action button
+        // of its own (see NotificationStore.kt), and tapping it already lands the user on this
+        // Overview screen anyway, right next to this already-familiar button. Read-only display of
+        // what the Plugin's own state machine decided, same principle as the ALC timer below — this
+        // Fragment only formats it, the click handler (further down) is what actually acts on it.
+        val preMealWindowActive = preferences.get(LongNonKey.ApsBoostPreMealWindowActiveUntilMs) > dateUtil.now()
+        binding.v2BtnMealLabel.text = if (preMealWindowActive) "Cancel" else "MEAL"
+
         // Alcohol protection timer/intensity (2026-08-25) — read-only display of what the Plugin's
         // own state machine already decided; this Fragment only formats it, never acts on it.
         val alcoholStartMs = preferences.get(LongNonKey.ApsBoostAlcoholProtectionStartMs)
@@ -1276,6 +1285,36 @@ class BoostOverviewV2Fragment : DaggerFragment(), View.OnClickListener {
 
                 // Meal/Alcohol confirmation buttons (Konzept 6, 2026-08-24).
                 R.id.v2_btn_meal -> {
+                    // Konzept 6.2 (2026-08-28): while the AUTO/learned pre-meal trigger is active
+                    // (see the label-refresh code above), this SAME button is the Cancel action
+                    // instead of a fresh MEAL tap — same single-writer principle as below, just a
+                    // different LongNonKey. Re-read here (not the value cached at refresh time) so a
+                    // tap always acts on the current state even if the screen hasn't refreshed yet.
+                    if (preferences.get(LongNonKey.ApsBoostPreMealWindowActiveUntilMs) > dateUtil.now()) {
+                        val tapNow = dateUtil.now()
+                        preferences.put(LongNonKey.ApsBoostPreMealCancelledUntilMs, tapNow + 2 * 60 * 60_000L)
+                        // Clear immediately (don't wait for the Plugin's next cycle to notice the
+                        // cancellation and stop refreshing this) so the button reverts to MEAL right
+                        // away instead of lingering as "Cancel" for up to ~10 more minutes.
+                        preferences.put(LongNonKey.ApsBoostPreMealWindowActiveUntilMs, 0L)
+                        aapsLogger.debug(LTag.APS, "Boost pre-meal CANCEL tapped at ${dateUtil.dateAndTimeString(tapNow)}")
+                        handler.postDelayed({ refreshAll() }, 1500L)
+                        val cancelFlashColor = Color.parseColor("#ffb300")
+                        binding.v2BtnMealLabel.text = "CANCELLED"
+                        binding.v2BtnMeal.setCardBackgroundColor(Color.parseColor("#33ffb300"))
+                        binding.v2BtnMeal.strokeColor = Color.parseColor("#4dffb300")
+                        binding.v2BtnMealIcon.setColorFilter(cancelFlashColor)
+                        binding.v2BtnMealLabel.setTextColor(cancelFlashColor)
+                        binding.v2BtnMealLabel.postDelayed({
+                            binding.v2BtnMealLabel.text = "MEAL"
+                            val mealNormalColor = Color.parseColor("#00d4ff")
+                            binding.v2BtnMeal.setCardBackgroundColor(Color.parseColor("#1a00d4ff"))
+                            binding.v2BtnMeal.strokeColor = Color.parseColor("#2600d4ff")
+                            binding.v2BtnMealIcon.setColorFilter(mealNormalColor)
+                            binding.v2BtnMealLabel.setTextColor(mealNormalColor)
+                        }, 2000L)
+                        return
+                    }
                     // Step 4 (2026-08-24): only persist the tap timestamp here — the Fragment does
                     // NOT compute or touch dosing itself. OpenAPSBoostPlugin's next cycle(s) read this
                     // and run the actual (shadow-first) pre-meal logic. Single-writer principle: only

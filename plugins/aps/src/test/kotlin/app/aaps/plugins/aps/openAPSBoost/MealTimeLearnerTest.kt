@@ -7,6 +7,10 @@ import org.junit.jupiter.api.Test
  * V6 MealTimeLearner — clustering of V5-CONFIRMED meal commits into habitual meal modes, and the
  * pre-meal lead-window query that drives the anticipatory low target. Pure functions, tested
  * directly with offset = 0 so an event's UTC ms maps 1:1 to its local minute-of-day.
+ *
+ * 2026-08-28 — updated for the manual/auto event-source distinction and the Stage 1/2 trust gates
+ * (Konzept 6.2). Each value hand-verified before writing the assertion, same discipline as
+ * BoostFloorSlewShadowTest/BoostOvershootGuardShadowTest.
  */
 class MealTimeLearnerTest {
 
@@ -14,9 +18,12 @@ class MealTimeLearnerTest {
     private val dayMs = 24L * 60L * 60L * 1000L
 
     /** Event at `minute` of local day `day`, with offset 0 → msToMinOfDay == minute, dayIndex == day. */
-    private fun ev(day: Long, minute: Int): Long = day * dayMs + minute * 60_000L
+    private fun ev(day: Long, minute: Int, manual: Boolean = false): MealTimeLearner.MealEvent =
+        MealTimeLearner.MealEvent(day * dayMs + minute * 60_000L, manual)
 
-    private fun historyOf(vararg events: Long) =
+    private fun tsOf(day: Long, minute: Int): Long = day * dayMs + minute * 60_000L
+
+    private fun historyOf(vararg events: MealTimeLearner.MealEvent) =
         MealTimeLearner.History(events.toMutableList())
 
     // ─── empty / corrupt ──────────────────────────────────────────────────────
@@ -32,10 +39,17 @@ class MealTimeLearnerTest {
         assertThat(MealTimeLearner.History.deserialize("").events).isEmpty()
     }
 
-    @Test fun `serialize round-trips`() {
-        val h = historyOf(ev(1, 480), ev(2, 485))
+    @Test fun `serialize round-trips with the manual flag preserved`() {
+        val h = historyOf(ev(1, 480, manual = true), ev(2, 485, manual = false))
         val back = MealTimeLearner.History.deserialize(h.serialize())
-        assertThat(back.events).containsExactly(ev(1, 480), ev(2, 485)).inOrder()
+        assertThat(back.events).containsExactly(ev(1, 480, manual = true), ev(2, 485, manual = false)).inOrder()
+    }
+
+    @Test fun `legacy plain-long array deserializes as all-manual-false`() {
+        // Pre-2026-08-28 storage shape: {"events":[<ms>,<ms>]} — no source tag.
+        val legacy = "{\"events\":[" + tsOf(1, 480) + "," + tsOf(2, 485) + "]}"
+        val h = MealTimeLearner.History.deserialize(legacy)
+        assertThat(h.events).containsExactly(ev(1, 480, manual = false), ev(2, 485, manual = false)).inOrder()
     }
 
     // ─── confidence thresholds ──────────────────────────────────────────────────
@@ -62,6 +76,7 @@ class MealTimeLearnerTest {
         assertThat(modes).hasSize(1)
         assertThat(modes[0].centreMin).isWithin(2).of(480)   // ~08:00
         assertThat(modes[0].distinctDays).isEqualTo(6)
+        assertThat(modes[0].manualDistinctDays).isEqualTo(0)   // all auto in this fixture
     }
 
     @Test fun `two separated clusters form two modes`() {
@@ -73,6 +88,22 @@ class MealTimeLearnerTest {
         assertThat(centres).hasSize(2)
         assertThat(centres[0]).isWithin(2).of(480)
         assertThat(centres[1]).isWithin(2).of(1140)
+    }
+
+    // ─── manual-distinct-days counting (Konzept 6.2) ─────────────────────────────
+
+    @Test fun `manualDistinctDays counts only distinct days with a manual tap, not raw manual events`() {
+        // 6 days, 2 of them (day 1 and day 2) have a manual tap. Day 1 has TWO manual taps — must
+        // still count as ONE distinct day, not two.
+        val h = historyOf(
+            ev(1, 479, manual = true), ev(1, 480, manual = true),
+            ev(2, 480, manual = true),
+            ev(3, 480), ev(4, 480), ev(5, 480), ev(6, 480),
+        )
+        val modes = MealTimeLearner.modes(h, offset)
+        assertThat(modes).hasSize(1)
+        assertThat(modes[0].distinctDays).isEqualTo(6)
+        assertThat(modes[0].manualDistinctDays).isEqualTo(2)
     }
 
     // ─── circular wrap ───────────────────────────────────────────────────────────
@@ -97,6 +128,7 @@ class MealTimeLearnerTest {
     @Test fun `window opens leadMax before and closes 45 before the meal`() {
         // mode centre ≈ 08:00 (480, may round to 479). leadMax = 60 → window covers ~[45, 60] min
         // before the meal. Use interior points (margin ≥ 2 min) to stay robust to ±1 centre rounding.
+        // No nowDayType supplied here -> pooled/backward-compat path -> Stage 1 gate not applied.
         val h = breakfastHistory()
         assertThat(MealTimeLearner.preMealWindow(h, 425, offset, 60)).isNotNull()   // ~54 min before — inside
         assertThat(MealTimeLearner.preMealWindow(h, 432, offset, 60)).isNotNull()   // ~47 min before — inside
@@ -122,13 +154,13 @@ class MealTimeLearnerTest {
 
     // ─── record + prune ───────────────────────────────────────────────────────────
 
-    @Test fun `record appends and prunes events older than the 60-day window`() {
+    @Test fun `record appends and prunes events older than the 60-day window, preserving manual flag`() {
         val now = 100L * dayMs
-        val old = now - 61L * dayMs        // outside 60-day window
-        val recent = now - 3L * dayMs
+        val old = MealTimeLearner.MealEvent(now - 61L * dayMs, false)       // outside 60-day window
+        val recent = MealTimeLearner.MealEvent(now - 3L * dayMs, true)
         var h = MealTimeLearner.History(mutableListOf(old, recent))
-        h = MealTimeLearner.record(h, now)
-        assertThat(h.events).containsExactly(recent, now).inOrder()   // old pruned, new kept
+        h = MealTimeLearner.record(h, now, manual = true)
+        assertThat(h.events).containsExactly(recent, MealTimeLearner.MealEvent(now, true)).inOrder()   // old pruned, new kept
     }
 
     // ─── day-type split (2026-08-24) ──────────────────────────────────────────────
@@ -137,12 +169,12 @@ class MealTimeLearnerTest {
     // java.time.LocalDate.ofEpochDay so the test data is trustworthy, not just self-consistent).
 
     @Test fun `dayTypeOf recognises real Sunday, Saturday and weekday epoch days`() {
-        assertThat(MealTimeLearner.dayTypeOf(ev(3, 0), offset)).isEqualTo(MealTimeLearner.DayType.SUNDAY)
-        assertThat(MealTimeLearner.dayTypeOf(ev(10, 0), offset)).isEqualTo(MealTimeLearner.DayType.SUNDAY)
-        assertThat(MealTimeLearner.dayTypeOf(ev(2, 0), offset)).isEqualTo(MealTimeLearner.DayType.SATURDAY)
-        assertThat(MealTimeLearner.dayTypeOf(ev(9, 0), offset)).isEqualTo(MealTimeLearner.DayType.SATURDAY)
-        assertThat(MealTimeLearner.dayTypeOf(ev(4, 0), offset)).isEqualTo(MealTimeLearner.DayType.WEEKDAY)   // Monday
-        assertThat(MealTimeLearner.dayTypeOf(ev(1, 0), offset)).isEqualTo(MealTimeLearner.DayType.WEEKDAY)   // Friday
+        assertThat(MealTimeLearner.dayTypeOf(tsOf(3, 0), offset)).isEqualTo(MealTimeLearner.DayType.SUNDAY)
+        assertThat(MealTimeLearner.dayTypeOf(tsOf(10, 0), offset)).isEqualTo(MealTimeLearner.DayType.SUNDAY)
+        assertThat(MealTimeLearner.dayTypeOf(tsOf(2, 0), offset)).isEqualTo(MealTimeLearner.DayType.SATURDAY)
+        assertThat(MealTimeLearner.dayTypeOf(tsOf(9, 0), offset)).isEqualTo(MealTimeLearner.DayType.SATURDAY)
+        assertThat(MealTimeLearner.dayTypeOf(tsOf(4, 0), offset)).isEqualTo(MealTimeLearner.DayType.WEEKDAY)   // Monday
+        assertThat(MealTimeLearner.dayTypeOf(tsOf(1, 0), offset)).isEqualTo(MealTimeLearner.DayType.WEEKDAY)   // Friday
     }
 
     @Test fun `pooled modes blend a Sunday and a nearby Saturday pattern into one mode`() {
@@ -178,8 +210,9 @@ class MealTimeLearnerTest {
         assertThat(byDayType[MealTimeLearner.DayType.WEEKDAY].orEmpty()).isEmpty()   // no weekday events at all
     }
 
-    @Test fun `preMealWindow with nowDayType only fires for that day-type's own mode`() {
-        val sundays = listOf(3L, 10L, 17L, 24L, 31L, 38L).map { ev(it, 780) }
+    @Test fun `preMealWindow with nowDayType only fires for that day-type own mode, once Stage 1 confirmed`() {
+        // 2 of the 6 Sundays manually confirmed -> satisfies MIN_MANUAL_CONFIRMATION_DAYS(2).
+        val sundays = listOf(3L, 10L, 17L, 24L, 31L, 38L).mapIndexed { i, d -> ev(d, 780, manual = i < 2) }
         val saturdays = listOf(2L, 9L, 16L, 23L, 30L, 37L).map { ev(it, 790) }
         val h = MealTimeLearner.History((sundays + saturdays).toMutableList())
 
@@ -189,7 +222,116 @@ class MealTimeLearnerTest {
         // though the pooled/Saturday data would have matched. This is the actual bug being fixed:
         // a weekday must never borrow a weekend-only pattern.
         assertThat(MealTimeLearner.preMealWindow(h, 725, offset, 60, MealTimeLearner.DayType.WEEKDAY)).isNull()
-        // Omitting nowDayType falls back to the old pooled behaviour — still fires (backward compat).
+        // Omitting nowDayType falls back to the old pooled behaviour (no Stage 1 gate) — still fires.
         assertThat(MealTimeLearner.preMealWindow(h, 725, offset, 60)).isNotNull()
+    }
+
+    // ─── Stage 1 trust gate (Konzept 6.2, 2026-08-28) ────────────────────────────
+
+    @Test fun `an otherwise-valid day-type mode does NOT fire without enough manual confirmations`() {
+        // Same Sunday cluster as above, but ZERO manual taps this time.
+        val sundays = listOf(3L, 10L, 17L, 24L, 31L, 38L).map { ev(it, 780) }
+        val h = MealTimeLearner.History(sundays.toMutableList())
+        assertThat(MealTimeLearner.preMealWindow(h, 725, offset, 60, MealTimeLearner.DayType.SUNDAY)).isNull()
+    }
+
+    @Test fun `exactly MIN_MANUAL_CONFIRMATION_DAYS is enough, one fewer is not`() {
+        val sundaysDays = listOf(3L, 10L, 17L, 24L, 31L, 38L)
+        val oneConfirmed = MealTimeLearner.History(sundaysDays.mapIndexed { i, d -> ev(d, 780, manual = i < 1) }.toMutableList())
+        val twoConfirmed = MealTimeLearner.History(sundaysDays.mapIndexed { i, d -> ev(d, 780, manual = i < 2) }.toMutableList())
+        assertThat(MealTimeLearner.preMealWindow(oneConfirmed, 725, offset, 60, MealTimeLearner.DayType.SUNDAY)).isNull()
+        assertThat(MealTimeLearner.preMealWindow(twoConfirmed, 725, offset, 60, MealTimeLearner.DayType.SUNDAY)).isNotNull()
+    }
+
+    @Test fun `two manual taps on the SAME day count as one distinct day, not enough alone`() {
+        val sundaysDays = listOf(3L, 10L, 17L, 24L, 31L, 38L)
+        val events = sundaysDays.mapIndexed { i, d -> ev(d, 780, manual = i == 0) }.toMutableList()
+        events.add(ev(3, 781, manual = true))   // a second manual tap on day 3, same cluster
+        val h = MealTimeLearner.History(events)
+        // Still only 1 distinct manually-confirmed day -> gate not satisfied.
+        assertThat(MealTimeLearner.preMealWindow(h, 725, offset, 60, MealTimeLearner.DayType.SUNDAY)).isNull()
+    }
+
+    // ─── Stage 2 graduation (Konzept 6.2, 2026-08-28) ────────────────────────────
+
+    @Test fun `recordGraduationProgress does not graduate below either threshold`() {
+        val key = MealTimeLearner.ModeKey(MealTimeLearner.DayType.SUNDAY, 780)
+        var state = MealTimeLearner.GraduationState()
+        // 8 confirmations but all in the SAME week (dayIndex 0..7 spans <2 weeks) -> distinctWeeks too low.
+        for (day in 0L until 8L) state = MealTimeLearner.recordGraduationProgress(state, key, day, nowMs = 0L)
+        assertThat(MealTimeLearner.isGraduated(state, key, nowMs = 0L)).isFalse()
+    }
+
+    @Test fun `recordGraduationProgress graduates once both day-count and week-spread thresholds are met`() {
+        val key = MealTimeLearner.ModeKey(MealTimeLearner.DayType.SUNDAY, 780)
+        var state = MealTimeLearner.GraduationState()
+        // 8 confirmations, one every 7 days -> 8 distinct weeks, >= GRADUATION_MIN_DISTINCT_WEEKS(6).
+        val days = (0 until 8).map { it * 7L }
+        for (day in days) state = MealTimeLearner.recordGraduationProgress(state, key, day, nowMs = day * 86_400_000L)
+        assertThat(MealTimeLearner.isGraduated(state, key, nowMs = days.last() * 86_400_000L)).isTrue()
+    }
+
+    @Test fun `a mode re-graduates after expiry once enough FRESH evidence accumulates again`() {
+        // Regression test for a real bug found on re-check: the first implementation only ever
+        // evaluated the graduation thresholds while graduatedAtMs == 0L, so an expired record could
+        // never re-graduate no matter how many fresh confirmations arrived afterwards.
+        val key = MealTimeLearner.ModeKey(MealTimeLearner.DayType.SUNDAY, 780)
+        var state = MealTimeLearner.GraduationState()
+        val firstRun = (0 until 8).map { it * 7L }
+        for (day in firstRun) state = MealTimeLearner.recordGraduationProgress(state, key, day, nowMs = day * 86_400_000L)
+        val firstGraduatedAtMs = firstRun.last() * 86_400_000L
+        assertThat(MealTimeLearner.isGraduated(state, key, nowMs = firstGraduatedAtMs)).isTrue()
+
+        // Well past expiry, and past the pruning cutoff for ALL of firstRun's days too.
+        val expiredNowMs = firstGraduatedAtMs + MealTimeLearner.GRADUATION_VALIDITY_MS + 1
+        assertThat(MealTimeLearner.isGraduated(state, key, nowMs = expiredNowMs)).isFalse()
+
+        // A single fresh confirmation right after expiry is NOT enough on its own...
+        val expiredNowDay = expiredNowMs / 86_400_000L
+        state = MealTimeLearner.recordGraduationProgress(state, key, expiredNowDay, nowMs = expiredNowMs)
+        assertThat(MealTimeLearner.isGraduated(state, key, nowMs = expiredNowMs)).isFalse()
+
+        // ...but a full fresh run of 8 confirmations over 8 distinct weeks, starting from scratch
+        // after expiry, DOES re-graduate it.
+        val secondRun = (0 until 8).map { expiredNowDay + it * 7L }
+        for (day in secondRun) state = MealTimeLearner.recordGraduationProgress(state, key, day, nowMs = day * 86_400_000L)
+        val secondGraduatedAtMs = secondRun.last() * 86_400_000L
+        assertThat(MealTimeLearner.isGraduated(state, key, nowMs = secondGraduatedAtMs)).isTrue()
+    }
+
+    @Test fun `graduation expires after GRADUATION_VALIDITY_MS`() {
+        val key = MealTimeLearner.ModeKey(MealTimeLearner.DayType.SUNDAY, 780)
+        var state = MealTimeLearner.GraduationState()
+        val days = (0 until 8).map { it * 7L }
+        var graduatedAtMs = 0L
+        for (day in days) {
+            graduatedAtMs = day * 86_400_000L
+            state = MealTimeLearner.recordGraduationProgress(state, key, day, nowMs = graduatedAtMs)
+        }
+        assertThat(MealTimeLearner.isGraduated(state, key, nowMs = graduatedAtMs + MealTimeLearner.GRADUATION_VALIDITY_MS - 1)).isTrue()
+        assertThat(MealTimeLearner.isGraduated(state, key, nowMs = graduatedAtMs + MealTimeLearner.GRADUATION_VALIDITY_MS + 1)).isFalse()
+    }
+
+    @Test fun `a graduated mode fires even with zero fresh Stage 1 confirmations in the rolling window`() {
+        // Cluster with NO manual taps at all (would normally fail Stage 1)...
+        val sundays = listOf(3L, 10L, 17L, 24L, 31L, 38L).map { ev(it, 780) }
+        val h = MealTimeLearner.History(sundays.toMutableList())
+        // ...but the same time-slot key has already graduated separately.
+        val key = MealTimeLearner.modeKeyOf(MealTimeLearner.DayType.SUNDAY, 780)
+        var state = MealTimeLearner.GraduationState()
+        for (day in (0 until 8).map { it * 7L }) state = MealTimeLearner.recordGraduationProgress(state, key, day, nowMs = day * 86_400_000L)
+
+        assertThat(MealTimeLearner.preMealWindow(h, 725, offset, 60, MealTimeLearner.DayType.SUNDAY, graduationState = state, nowMs = 100L * 86_400_000L)).isNotNull()
+    }
+
+    @Test fun `graduation cannot manufacture a mode where the underlying auto-cluster no longer exists`() {
+        // Only 3 distinct days total -> below MIN_DISTINCT_DAYS(4) -> no cluster forms at all,
+        // regardless of graduation state.
+        val h = MealTimeLearner.History(listOf(3L, 10L, 17L).map { ev(it, 780) }.toMutableList())
+        val key = MealTimeLearner.modeKeyOf(MealTimeLearner.DayType.SUNDAY, 780)
+        var state = MealTimeLearner.GraduationState()
+        for (day in (0 until 8).map { it * 7L }) state = MealTimeLearner.recordGraduationProgress(state, key, day, nowMs = day * 86_400_000L)
+
+        assertThat(MealTimeLearner.preMealWindow(h, 725, offset, 60, MealTimeLearner.DayType.SUNDAY, graduationState = state, nowMs = 100L * 86_400_000L)).isNull()
     }
 }

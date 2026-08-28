@@ -24,6 +24,16 @@ enum class LongNonKey(
     // Settings toggle — internal bridge between the UI tap and the loop's calculation cycle.
     ApsBoostLastMealTapMs("boost_last_meal_tap_ms", 0L),
     ApsBoostLastAlcoholTapMs("boost_last_alcohol_tap_ms", 0L),
+    // Konzept 6.2 (2026-08-28) — set by the Cancel action on the pre-meal notification; suppresses
+    // the AUTO/learned pre-meal trigger (never a manual tap) until this timestamp. See
+    // OpenAPSBoostPlugin.kt's learnedHit branch.
+    ApsBoostPreMealCancelledUntilMs("boost_premeal_cancelled_until_ms", 0L),
+    // Konzept 6.2 (2026-08-28) — set by the Plugin every cycle the AUTO/learned pre-meal trigger is
+    // active (to now + a few cycles' buffer), read-only by BoostOverviewV2Fragment to switch the
+    // MEAL button into "Cancel" mode. Self-expiring by design (no explicit clear needed): once the
+    // Plugin stops re-asserting it (window closed, or cancelled — firedViaLearnedHit false next
+    // cycle), it just goes stale within the buffer instead of the Fragment needing a separate signal.
+    ApsBoostPreMealWindowActiveUntilMs("boost_premeal_window_active_until_ms", 0L),
 
     // Konzept 6 (2026-08-25) — Fragment -> Plugin: long-press on ALC requests an immediate manual
     // end of the active alcohol-protection session (epoch ms of the long-press). Same

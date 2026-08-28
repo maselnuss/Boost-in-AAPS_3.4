@@ -103,6 +103,14 @@ enum class StringKey(
     // meals → feature never fires (safe default).
     ApsBoostMealTimeHistory("boost_meal_time_history", "", defaultedBySM = true),
 
+    // Konzept 6.2 (2026-08-28) — Stage 2 graduation progress for the manual-confirmation trust
+    // gates (see MealTimeLearner.kt "Manual-confirmation trust gates"). Persisted SEPARATELY from
+    // ApsBoostMealTimeHistory because it must survive that history's 60-day rolling prune — a
+    // time-slot's graduation is tracked for up to MealTimeLearner.GRADUATION_VALIDITY_MS (180d)
+    // regardless of how old the individual confirming taps are. Empty/corrupt → no graduated
+    // slots → every mode falls back to the Stage 1 rolling-window gate (safe default).
+    ApsBoostMealTimeGraduation("boost_meal_time_graduation", "", defaultedBySM = true),
+
     // Activity-load SHADOW (2026-06-16) — JSON of single-source per-day step totals (rolling 28d).
     // Drives the personal step baseline; the activity/inactivity ISF factors are LOGGED ONLY (shadow).
     ApsBoostDailyStepHistory("boost_daily_step_history", "", defaultedBySM = true),

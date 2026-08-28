@@ -227,7 +227,7 @@
     <string name="boost_meal_alcohol_buttons_title">Meal/Alcohol Buttons</string>
     <string name="boost_meal_alcohol_buttons_summary">Manual Overview buttons for meal and alcohol confirmation</string>
     <string name="boost_show_meal_button_title">Show MEAL button</string>
-    <string name="boost_show_meal_button_summary">Tap the moment you start eating — immediately sets the pre-meal target above and trains MealTimeLearner, independent of any learned time window. Shadow-first: no dosing change until validated.</string>
+    <string name="boost_show_meal_button_summary">Tap the moment you start eating. Two separate effects: (1) trains MealTimeLearner with this real event, independent of any learned time window — LIVE, always recorded, zero dosing risk. (2) SHADOW ONLY, never changes dosing — logs what the pre-meal target above would have done had it actually applied.</string>
     <string name="boost_show_alcohol_button_title">Show ALC button</string>
     <string name="boost_show_alcohol_button_summary">Tap as soon as you start drinking anything alcoholic, including mixed/diluted drinks like Radler or Aperol Spritz. Gradually dampens SMB to guard against delayed post-alcohol hypoglycemia (impaired liver counter-regulation). Starts light, escalates automatically on repeated BG waves or another tap; ends on its own once BG has been stable for a while (2–8h). Shadow-first: no dosing change until validated.</string>
     <string name="boost_alcohol_light_multiplier_title">Light Intensity — SMB Multiplier</string>

@@ -152,6 +152,10 @@ open class Notification {
         // generic one-off message ID.
         const val BOOST_V5_PERIODIC_REVIEW = 1001
 
+        // Konzept 6.2 (2026-08-28) — Boost V6 pre-meal auto-fire, offers a Cancel action. Own ID so
+        // a re-fired notification (a new occurrence) replaces the previous one instead of stacking.
+        const val BOOST_V6_PREMEAL_CANCEL = 1002
+
         const val IMPORTANCE_HIGH = 2
         const val CATEGORY_ALARM = "alarm"
     }
