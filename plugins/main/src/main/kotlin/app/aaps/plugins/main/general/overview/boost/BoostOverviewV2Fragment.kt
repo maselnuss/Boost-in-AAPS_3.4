@@ -6,6 +6,7 @@ import android.graphics.Color
 import android.os.Bundle
 import android.os.Handler
 import android.os.HandlerThread
+import android.util.TypedValue
 import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
@@ -190,7 +191,7 @@ class BoostOverviewV2Fragment : DaggerFragment(), View.OnClickListener {
         val gridColor = Color.parseColor("#1a1d28")
         binding.v2BgGraph.gridLabelRenderer?.gridColor = gridColor
         binding.v2BgGraph.gridLabelRenderer?.reloadStyles()
-        binding.v2BgGraph.gridLabelRenderer?.textSize = 11f * resources.displayMetrics.scaledDensity
+        binding.v2BgGraph.gridLabelRenderer?.textSize = TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_SP, 11f, resources.displayMetrics)
         binding.v2BgGraph.gridLabelRenderer?.labelVerticalWidth = axisWidth
         binding.v2BgGraph.gridLabelRenderer?.horizontalLabelsColor = Color.parseColor("#aaaaaa")
         binding.v2BgGraph.gridLabelRenderer?.verticalLabelsColor = Color.parseColor("#aaaaaa")
@@ -985,7 +986,7 @@ class BoostOverviewV2Fragment : DaggerFragment(), View.OnClickListener {
             // is actually drawn. Only the structural properties that applyV2Theme() never touches
             // go here.
             graph.gridLabelRenderer?.reloadStyles()
-            graph.gridLabelRenderer?.textSize = 11f * resources.displayMetrics.scaledDensity
+            graph.gridLabelRenderer?.textSize = TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_SP, 11f, resources.displayMetrics)
             graph.gridLabelRenderer?.isHorizontalLabelsVisible = false
             graph.gridLabelRenderer?.labelVerticalWidth = axisWidth
             graph.gridLabelRenderer?.numVerticalLabels = 3
