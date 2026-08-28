@@ -3252,7 +3252,12 @@ open class OpenAPSBoostPlugin @Inject constructor(
                 //     activity detection (Konzept 8) deliberately lives OUTSIDE this screen, under
                 //     Health Connect Settings — it registers a live Android OS listener/permission,
                 //     a different kind of thing from a pure computed estimate, even though its
-                //     dosing impact is currently also shadow-only.
+                //     dosing impact is currently also shadow-only. A CHILD of "7. Advanced
+                //     Settings" (2026-08-28, corrected — an earlier pass made it a top-level
+                //     sibling here while OpenAPSBoostV5Plugin.kt kept it nested, an inconsistency
+                //     depending on which engine is selected; the agreed, screenshot-verified
+                //     placement is nested, one level up from where it lived originally, not
+                //     promoted out of Advanced entirely).
                 addPreference(preferenceManager.createPreferenceScreen(context).apply {
                     key = "boost_shadow_concepts_settings"
                     title = rh.gs(R.string.boost_shadow_concepts_title)

@@ -49,6 +49,7 @@
     <string name="boost_v5_shortname">V6</string>
     <string name="description_boost_v5">Boost V6 — Observe-Confirm-Commit dosing. Runs the Boost engine with V6\'s meal-aware SMB override. Select this as your APS to use V6; select plain \"Boost\" to run the base engine with the override in shadow.</string>
     <string name="boost_v5_v6_settings">Boost V6 controls</string>
+    <string name="boost_v5_advanced_settings_title">Boost Advanced Settings</string>
     <string name="boost_v1_smb_sizing_title">Boost base-engine SMB sizing</string>
     <string name="boost_v5_fast_carb_confirm_title">V6 fast-carb fast-path</string>
     <string name="boost_v5_fast_carb_confirm_summary">When a rise is sharp AND accelerating AND the meal score corroborates (and you\'re awake, not exercising), V6 confirms the meal in one cycle instead of waiting — so fast carbs get covered ~15 min earlier. Replay-validated to avoid firing on sleep/compression. Toggle off to revert to the standard observe-confirm timing.</string>

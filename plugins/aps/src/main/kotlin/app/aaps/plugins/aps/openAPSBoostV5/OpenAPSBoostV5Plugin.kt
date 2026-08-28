@@ -1236,7 +1236,12 @@ open class OpenAPSBoostV5Plugin @Inject constructor(
         //    Build it fully BEFORE attaching to the category. ──
         val advanced = preferenceManager.createPreferenceScreen(context).apply {
             key = "boost_advanced_settings"
-            title = rh.gs(app.aaps.core.ui.R.string.advanced_settings_title)
+            // 2026-08-28 (user request): was the SHARED advanced_settings_title ("Advanced
+            // Settings") — identical to the generic oref-style screen nested inside this one
+            // (absorption_smb_advanced), confusing when both appear in the same navigation path.
+            // Own Boost-specific title here; the shared string is untouched for every other
+            // algorithm that still legitimately uses it.
+            title = rh.gs(R.string.boost_v5_advanced_settings_title)
             addPreference(AdaptiveDoublePreference(ctx = context, doubleKey = DoubleKey.ApsBoostV5Sensitivity, dialogMessage = R.string.boost_v5_sensitivity_summary, title = R.string.boost_v5_sensitivity_title))
             addPreference(AdaptiveDoublePreference(ctx = context, doubleKey = DoubleKey.ApsBoostV5ConfirmedCapU, dialogMessage = R.string.boost_v5_confirmed_cap_summary, title = R.string.boost_v5_confirmed_cap_title))
             addPreference(AdaptiveDoublePreference(ctx = context, doubleKey = DoubleKey.ApsBoostV5CommittedCapU, dialogMessage = R.string.boost_v5_committed_cap_summary, title = R.string.boost_v5_committed_cap_title))
@@ -1271,6 +1276,21 @@ open class OpenAPSBoostV5Plugin @Inject constructor(
         // Shared engine settings nested under Advanced. includeEngineEssentials = false: the
         // 6 essentials above are NOT repeated inside the engine sub-screens (no duplicate keys).
         openAPSBoostEngine.get().addBoostEngineCategories(preferenceManager, advanced, context, includeEngineEssentials = false)
+        // Shadow Concepts (2026-08-28, user request) — home for all pure-computation SHADOW-ONLY
+        // concepts (Konzept 1, Konzept 10, ...); nothing here ever touches dosing/target. Placed
+        // directly here, between the shared "Advanced Settings" screen just added above and the
+        // Restore action below — was previously nested a confusing 3 levels deep, inside the
+        // shared engine's own "Advanced Settings" (itself inside THIS "Advanced" screen, both
+        // identically titled). Still conceptually "advanced/rarely touched" (hence staying under
+        // Advanced, not promoted to the top-level essentials above), just one hop instead of three.
+        advanced.addPreference(preferenceManager.createPreferenceScreen(context).apply {
+            key = "boost_shadow_concepts_settings"
+            title = rh.gs(R.string.boost_shadow_concepts_title)
+            summary = rh.gs(R.string.boost_shadow_concepts_summary)
+            addPreference(AdaptiveSwitchPreference(ctx = context, booleanKey = BooleanKey.ApsBoostFloorSlewShadowEnabled, summary = R.string.boost_floor_slew_shadow_enabled_summary, title = R.string.boost_floor_slew_shadow_enabled_title))
+            addPreference(AdaptiveDoublePreference(ctx = context, doubleKey = DoubleKey.ApsBoostFloorSlewAggressiveness, dialogMessage = R.string.boost_floor_slew_aggressiveness_summary, title = R.string.boost_floor_slew_aggressiveness_title))
+            addPreference(AdaptiveSwitchPreference(ctx = context, booleanKey = BooleanKey.ApsBoostPeakShadowCandidatesEnabled, summary = R.string.boost_peak_shadow_enabled_summary, title = R.string.boost_peak_shadow_enabled_title))
+        })
         // Undo safety net (2026-08-27, user request) — restore the managed knobs to their state
         // from immediately before the last (or 2nd-last) automatic AutoConfig/Periodic Review
         // apply. Added AFTER addBoostEngineCategories (2026-08-27, corrected — was previously
