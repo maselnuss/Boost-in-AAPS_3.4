@@ -137,6 +137,20 @@ class BoostV2GraphData @Inject constructor(
         val RATIO_LINE = Color.parseColor("#a78bfa")  // violet — sensitivity ratio
         val DEV_SLOPE_POS = Color.parseColor("#6ee7b7") // reuses TARGET_LINE's green — "accelerating up" reads as the same "good/reference" hue family
         val DEV_SLOPE_NEG = Color.parseColor("#ff5252") // reuses IN_RANGE_LOWER_BORDER's red — "accelerating down"
+
+        /** 2026-08-28 (user request, screenshot comparison): Deviations bars were the theme's
+         *  original colours — mostly `uamColor` (#c9bd60, muted khaki), which reads as visually
+         *  unremarkable next to the punchy V2 IOB_LINE blue, and `deviationBlackColor`
+         *  (#72000000, semi-transparent BLACK) which is close to invisible against the V2
+         *  near-black background (#0a0c10) specifically — a real, separate finding, not just the
+         *  "too similar to IOB" complaint. Remapped in [addDeviations] via a value-dependent-colour
+         *  lookup keyed on the ORIGINAL resolved attribute colour (not a duplicated category
+         *  re-derivation), so it stays correct if the underlying theme colours ever change. */
+        val DEV_UAM = Color.parseColor("#f472b6")    // pink/magenta — the dominant category, needs to stand out
+        val DEV_GREY = Color.parseColor("#9ca3af")   // lighter blue-grey than the original muted grey
+        val DEV_BLACK_REPLACEMENT = Color.parseColor("#e5e7eb") // near-white — the original was literally invisible on V2's near-black bg
+        val DEV_GREEN = Color.parseColor("#6ee7b7")  // reuses TARGET_LINE's green — "+", same good/reference hue family
+        val DEV_RED = Color.parseColor("#ff5252")    // reuses IN_RANGE_LOWER_BORDER's red — "-"
     }
 
     // ── Internal state (mirrors GraphData) ───────────────────────────────
@@ -254,15 +268,34 @@ class BoostV2GraphData @Inject constructor(
         addSeries(overviewData.cobMinFailOverSeries as PointsWithLabelGraphSeries<DataPointWithLabelInterface>)
     }
 
-    fun addDeviations(useForScale: Boolean, scale: Double) {
+    fun addDeviations(useForScale: Boolean, scale: Double, context: Context?) {
         if (useForScale) {
             maxY = overviewData.maxDevValueFound
             minY = -maxY
         }
         overviewData.devScale.multiplier = maxY * scale / overviewData.maxDevValueFound
-        // No V2 colour override here — deliberately. Deviations colours per-bar (green/red by sign)
-        // via DeviationDataPoint.color, assigned where the points are built (PrepareIobAutosens-
-        // GraphDataWorker), not something a single series-level `.color` override could replace.
+        // 2026-08-28 (user request): Deviations colours per-bar (DeviationDataPoint.color, assigned
+        // in PrepareIobAutosensGraphDataWorker from 5 theme attrs: deviationBlackColor/Grey/Green/
+        // Red/uamColor) — no single series-level `.color` override applies here, unlike the other
+        // "delegated" methods. Remapped instead: resolve the SAME 5 original attr colours at
+        // runtime and match each bar's existing colour against them, swapping in a V2-legible
+        // replacement. Falls back to the original colour unchanged for anything that doesn't match
+        // (fails safe — never renders wrong/no colour, worst case keeps the old muted look).
+        val originalUam = rh.gac(context, app.aaps.core.ui.R.attr.uamColor)
+        val originalGrey = rh.gac(context, app.aaps.core.ui.R.attr.deviationGreyColor)
+        val originalBlack = rh.gac(context, app.aaps.core.ui.R.attr.deviationBlackColor)
+        val originalGreen = rh.gac(context, app.aaps.core.ui.R.attr.deviationGreenColor)
+        val originalRed = rh.gac(context, app.aaps.core.ui.R.attr.deviationRedColor)
+        (overviewData.deviationsSeries as BarGraphSeries<DeviationDataPoint>).setValueDependentColor { p ->
+            when (p.color) {
+                originalUam -> DEV_UAM
+                originalGrey -> DEV_GREY
+                originalBlack -> DEV_BLACK_REPLACEMENT
+                originalGreen -> DEV_GREEN
+                originalRed -> DEV_RED
+                else -> p.color
+            }
+        }
         addSeries(overviewData.deviationsSeries as BarGraphSeries<DeviationDataPoint>)
     }
 
