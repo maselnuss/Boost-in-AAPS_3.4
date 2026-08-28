@@ -2093,8 +2093,12 @@ open class OpenAPSBoostPlugin @Inject constructor(
                     v5decision.mealHypothesis == MealHypothesis.IDLE ||
                     v5decision.mealHypothesis == MealHypothesis.OBSERVING
                 val trig = if (accel > 2.0 && rising && preConfirm) 1 else 0
-                it.reason.append("accelMeal=$trig,${Round.roundTo(accel, 0.1)},${Round.roundTo(glucoseStatus.shortAvgDelta, 0.1)}," +
-                    "${Round.roundTo(glucoseStatus.longAvgDelta, 0.1)},${glucoseStatus.glucose.toInt()},${v5decision?.mealHypothesis ?: "?"}; ")
+                val note = "accelMeal=$trig,${Round.roundTo(accel, 0.1)},${Round.roundTo(glucoseStatus.shortAvgDelta, 0.1)}," +
+                    "${Round.roundTo(glucoseStatus.longAvgDelta, 0.1)},${glucoseStatus.glucose.toInt()},${v5decision?.mealHypothesis ?: "?"}; "
+                it.reason.append(note)
+                // 2026-08-28: mirrored into consoleError too (user request) — same visibility as
+                // floorSlewShadow/alcoholShadow, so it's checkable in-app (Script Debug) without NS.
+                it.consoleError?.add(note.trimEnd(' ', ';'))
             }.onFailure { t -> aapsLogger.error(LTag.APS, "Accel-meal shadow failed (swallowed — dosing untouched)", t) }
             // Dose-budget composition SHADOW (2026-08-27, user request: "wie oft/wie stark ist der
             // Cap wirklich die bindende Grenze?"). READ-ONLY telemetry — logs the PRE-cap components
@@ -2139,10 +2143,12 @@ open class OpenAPSBoostPlugin @Inject constructor(
                         val deltaAcclNow = 100.0 * (delta - short) / max(abs(short), 2.0)
                         val looseWouldFire = deltaAcclNow < RECOVERING_DECEL_THRESHOLD && short > delta
                         val guardedWouldFire = looseWouldFire && delta < BACKOFF_GUARD_MAX_DELTA
-                        it.reason.append(
-                            "recoveringShadow=$looseWouldFire,$guardedWouldFire," +
-                                "${Round.roundTo(deltaAcclNow, 0.1)},${Round.roundTo(delta, 0.1)}; "
-                        )
+                        val note = "recoveringShadow=$looseWouldFire,$guardedWouldFire," +
+                            "${Round.roundTo(deltaAcclNow, 0.1)},${Round.roundTo(delta, 0.1)}; "
+                        it.reason.append(note)
+                        // 2026-08-28: mirrored into consoleError too (user request) — same
+                        // visibility as floorSlewShadow/alcoholShadow, checkable in-app without NS.
+                        it.consoleError?.add(note.trimEnd(' ', ';'))
                     }
                 }.onFailure { t -> aapsLogger.error(LTag.APS, "Recovering-backoff shadow failed (swallowed — dosing untouched)", t) }
             }
@@ -2171,21 +2177,23 @@ open class OpenAPSBoostPlugin @Inject constructor(
                             val overshoot = (eventualBg - targetBg).coerceAtLeast(0.0)
                             val actualDose = d.phase3.finalDose
                             val fixedScale = BoostOvershootGuardShadow.guardScale(overshoot, BoostOvershootGuardShadow.FIXED)
-                            it.reason.append(
-                                "overshootGuardFixedShadow=${Round.roundTo(overshoot, 0.1)},${Round.roundTo(fixedScale, 0.001)}," +
-                                    "${Round.roundTo(actualDose, 0.001)},${Round.roundTo(actualDose * fixedScale, 0.001)}; "
-                            )
+                            val fixedNote = "overshootGuardFixedShadow=${Round.roundTo(overshoot, 0.1)},${Round.roundTo(fixedScale, 0.001)}," +
+                                "${Round.roundTo(actualDose, 0.001)},${Round.roundTo(actualDose * fixedScale, 0.001)}; "
+                            it.reason.append(fixedNote)
+                            // 2026-08-28: mirrored into consoleError too (user request) — same
+                            // visibility as floorSlewShadow/alcoholShadow, checkable in-app without NS.
+                            it.consoleError?.add(fixedNote.trimEnd(' ', ';'))
                             val computedCoeffs = overshootCoeffsComputedCached
-                            if (computedCoeffs != null) {
+                            val computedNote = if (computedCoeffs != null) {
                                 val computedScale = BoostOvershootGuardShadow.guardScale(overshoot, computedCoeffs)
-                                it.reason.append(
-                                    "overshootGuardComputedShadow=${Round.roundTo(overshoot, 0.1)},${Round.roundTo(computedScale, 0.001)}," +
-                                        "${Round.roundTo(actualDose, 0.001)},${Round.roundTo(actualDose * computedScale, 0.001)}," +
-                                        "${Round.roundTo(computedCoeffs.base, 0.01)},${Round.roundTo(computedCoeffs.normalizationMgdl, 0.1)}; "
-                                )
+                                "overshootGuardComputedShadow=${Round.roundTo(overshoot, 0.1)},${Round.roundTo(computedScale, 0.001)}," +
+                                    "${Round.roundTo(actualDose, 0.001)},${Round.roundTo(actualDose * computedScale, 0.001)}," +
+                                    "${Round.roundTo(computedCoeffs.base, 0.01)},${Round.roundTo(computedCoeffs.normalizationMgdl, 0.1)}; "
                             } else {
-                                it.reason.append("overshootGuardComputedShadow=n/a; ")
+                                "overshootGuardComputedShadow=n/a; "
                             }
+                            it.reason.append(computedNote)
+                            it.consoleError?.add(computedNote.trimEnd(' ', ';'))
                         }
                     }
                 }.onFailure { t -> aapsLogger.error(LTag.APS, "Overshoot-guard shadow failed (swallowed — dosing untouched)", t) }

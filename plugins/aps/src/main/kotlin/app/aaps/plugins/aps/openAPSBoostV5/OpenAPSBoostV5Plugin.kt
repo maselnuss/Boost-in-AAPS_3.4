@@ -952,7 +952,11 @@ open class OpenAPSBoostV5Plugin @Inject constructor(
             // reason-string tags instead of RT fields). Compare against boostV5_state/age (which DO
             // stay RT fields — they predate the 2026-07-18 finding and are load-bearing elsewhere;
             // not touched here) to see how much earlier the aggressive gate would have confirmed.
-            rT.reason.append("aggConfirmShadow=${decision.aggressiveConfirmShadowState.name},${decision.aggressiveConfirmShadowAge}; ")
+            val aggConfirmShadowNote = "aggConfirmShadow=${decision.aggressiveConfirmShadowState.name},${decision.aggressiveConfirmShadowAge}; "
+            rT.reason.append(aggConfirmShadowNote)
+            // 2026-08-28: mirrored into consoleError too (user request) — same visibility as
+            // floorSlewShadow/alcoholShadow, checkable in-app (Script Debug) without NS.
+            rT.consoleError?.add(aggConfirmShadowNote.trimEnd(' ', ';'))
             rT.boostV5_budget = decision.aggressionBudget.budget
             rT.boostV5_actionMult = decision.actionMultiplier
             rT.boostV5_finalDose = decision.finalDose
