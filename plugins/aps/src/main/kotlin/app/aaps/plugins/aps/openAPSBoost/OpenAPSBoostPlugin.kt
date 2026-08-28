@@ -2752,11 +2752,27 @@ open class OpenAPSBoostPlugin @Inject constructor(
             if (alcoholShadowActive) {
                 val actualUnits = it.units ?: 0.0
                 val suppressedUnits = actualUnits * (1.0 - alcoholShadowMultiplier)
-                aapsLogger.debug(LTag.APS, "Alcohol dose-comparison (SHADOW, intensity=$alcoholIntensity, multiplier=$alcoholShadowMultiplier): actual final SMB=${actualUnits}U → would suppress ${suppressedUnits}U — see the real 'Result:' line immediately below (same cycle, same value)")
+                // Projected BG counterfactual (2026-08-28, user request): "how much would BG likely
+                // have differed" is a more directly readable comparison than a bare insulin-unit
+                // delta — turns the later outcome backtest from "reconstruct a BG estimate from the
+                // unit delta by hand" into "read it off directly". Deliberately a CHEAP linear
+                // approximation (suppressedUnits × this cycle's own dosing ISF), not a second
+                // determine_basal() call — the KDoc two paragraphs above already documents why a
+                // real shadow re-run was tried and rejected for Alcohol specifically (diverged from
+                // V6-ACTIVE's post-processing). No absorption/time-course modelling, just "this much
+                // less insulin, at this cycle's ISF, is roughly this much higher BG eventually" —
+                // approximate by construction, good enough for a directional backtest, not a
+                // replacement for the real prediction curves.
+                val isfMgdlPerU = it.variable_sens ?: oapsProfile.sens
+                val projectedBgDelta = suppressedUnits * isfMgdlPerU
+                val actualEventualBg = it.eventualBG ?: glucoseStatus.glucose
+                val projectedEventualBg = actualEventualBg + projectedBgDelta
+                aapsLogger.debug(LTag.APS, "Alcohol dose-comparison (SHADOW, intensity=$alcoholIntensity, multiplier=$alcoholShadowMultiplier): actual final SMB=${actualUnits}U → would suppress ${suppressedUnits}U (≈+${Round.roundTo(projectedBgDelta, 0.1)} mg/dl projected, ISF=${Round.roundTo(isfMgdlPerU, 0.1)}) — see the real 'Result:' line immediately below (same cycle, same value)")
                 // NS-visible condensed form (2026-08-26) — see the "NS-visible condensed notes"
                 // comment near the exercise-shadow block above for why. Also mirrored into
                 // consoleError so it shows up in-app on the Boost V6 "Script debug" screen too.
-                val alcoholShadowNote = "alcoholShadow: intensity=$alcoholIntensity actualSMB=${Round.roundTo(actualUnits, 0.01)}U wouldSuppressBy=${Round.roundTo(suppressedUnits, 0.01)}U"
+                val alcoholShadowNote = "alcoholShadow: intensity=$alcoholIntensity actualSMB=${Round.roundTo(actualUnits, 0.01)}U wouldSuppressBy=${Round.roundTo(suppressedUnits, 0.01)}U " +
+                    "actualEventualBg=${Round.roundTo(actualEventualBg, 0.1)} projectedEventualBg=${Round.roundTo(projectedEventualBg, 0.1)}"
                 it.reason.append("$alcoholShadowNote; ")
                 it.consoleError?.add(alcoholShadowNote)
             }
