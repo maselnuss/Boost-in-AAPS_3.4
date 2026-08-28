@@ -282,7 +282,13 @@ class OverviewMenusImpl @Inject constructor(
 
         val checkBoxListener = CompoundButton.OnCheckedChangeListener { buttonView, isChecked ->
             // Update other Checkboxes on same row to allow a curve to only one subgraph
-            if (isChecked) {
+            // 2026-08-29 TEMPORARY (Steps-bar bugfix verification, user request): skip the
+            // mutual-exclusion for STEPS only, so it can be shown in two secondary graphs at once
+            // (one combined with HR/DEV to exercise the secondScale path, one alone to exercise the
+            // primary-axis path) without needing two separate test passes. Scoped to STEPS alone —
+            // every other type keeps the normal one-graph-only behaviour. Revert once both paths are
+            // confirmed fixed.
+            if (isChecked && m != CharTypeData.STEPS) {
                 checkBoxes.forEach { checkBox ->
                     if (checkBox != buttonView) {
                         checkBox.isChecked = false
