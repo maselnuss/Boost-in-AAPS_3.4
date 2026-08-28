@@ -340,32 +340,42 @@ class BoostV2GraphData @Inject constructor(
     /**
      * V2-specific (2026-08-28, user request): Steps as a real bar chart (`BarGraphSeries`, bars
      * grow from a 0 baseline — matches Google Fit/Apple Health convention, unlike `addSteps`'s
-     * floating ticks) on its own independent `graph.secondScale` axis — never shares scale with HR
-     * or anything else on the row. Zero-step buckets get a small forced-visible stub height (bars
-     * at height 0 render as literally nothing, indistinguishable from a missing sample) in a dimmed
-     * grey via [ValueDependentColor], so "0 steps, actually measured" reads differently from "no
-     * data here at all" at a glance. Real (unclamped) step count drives the colour decision, not
-     * the display height — see [StepsBarPoint].
+     * floating ticks). Zero-step buckets get a small forced-visible stub height (bars at height 0
+     * render as literally nothing, indistinguishable from a missing sample) in a dimmed grey via
+     * [ValueDependentColor], so "0 steps, actually measured" reads differently from "no data here
+     * at all" at a glance. Real (unclamped) step count drives the colour decision, not the display
+     * height — see [StepsBarPoint].
+     *
+     * [useForScale] (2026-08-28, user request, screenshot: a Steps-only row showed a meaningless
+     * 0/0.5/1 placeholder on the primary axis while the real 0-115 data sat on the secondary axis)
+     * — when true (nothing else on this row claims the primary axis), Steps renders directly on
+     * the primary axis like any other series, and `graph.secondScale` is never touched at all: no
+     * `secondScaleRequested`, no lazy-getter instantiation, none of the secondScale machinery below
+     * even runs for this row. When false (HR or another primary-axis series is also on this row),
+     * behaves exactly as before — its own independent `graph.secondScale` axis, never sharing scale
+     * with HR or anything else on the row.
      */
-    fun addStepsBars(context: Context?) {
-        // 2026-08-28: set BEFORE the empty check (found via screenshot after the NaN fix: HR now
-        // shows a sane fallback axis with zero data, but Steps showed no axis at all — inconsistent,
-        // since this row DID request Steps, it's just temporarily empty, not a row that never wanted
-        // Steps). [secondScaleRequested] lets performUpdate() distinguish "this row wants Steps but
-        // has none right now" (still show an empty axis, matching HR's fallback) from "this row never
-        // had addStepsBars called at all" (never touch secondScale — see the NaN-pollution fix above).
-        secondScaleRequested = true
-        // 2026-08-28 (user-reported via screenshot): right-axis labels were getting cut off at the
-        // screen edge. Root cause traced in GridLabelRenderer.java: calcLabelVerticalSecondScaleSize()
-        // — unlike the LEFT axis' equivalent, it reserves NO extra `labelsSpace` safety margin, and
-        // only measures ONE sample label (not the actual widest one shown). Combined with
-        // DefaultLabelFormatter's default behaviour (up to several fraction digits depending on the
-        // axis span), long decimal labels had little margin to spare. Steps counts are integers
-        // anyway, so forcing 0 fraction digits here removes the main source of long labels — safe
-        // to call every refresh (idempotent), and only reachable from here since this is the one
-        // place secondScaleRequested is already true (see the NaN-pollution fix's KDoc above).
-        val stepsFormat = NumberFormat.getIntegerInstance(Locale.US).also { it.isGroupingUsed = false }
-        graph.secondScale.labelFormatter = DefaultLabelFormatter(stepsFormat, stepsFormat)
+    fun addStepsBars(context: Context?, useForScale: Boolean) {
+        if (!useForScale) {
+            // 2026-08-28: set BEFORE the empty check (found via screenshot after the NaN fix: HR now
+            // shows a sane fallback axis with zero data, but Steps showed no axis at all — inconsistent,
+            // since this row DID request Steps, it's just temporarily empty, not a row that never wanted
+            // Steps). [secondScaleRequested] lets performUpdate() distinguish "this row wants Steps but
+            // has none right now" (still show an empty axis, matching HR's fallback) from "this row never
+            // had addStepsBars called at all" (never touch secondScale — see the NaN-pollution fix above).
+            secondScaleRequested = true
+            // 2026-08-28 (user-reported via screenshot): right-axis labels were getting cut off at the
+            // screen edge. Root cause traced in GridLabelRenderer.java: calcLabelVerticalSecondScaleSize()
+            // — unlike the LEFT axis' equivalent, it reserves NO extra `labelsSpace` safety margin, and
+            // only measures ONE sample label (not the actual widest one shown). Combined with
+            // DefaultLabelFormatter's default behaviour (up to several fraction digits depending on the
+            // axis span), long decimal labels had little margin to spare. Steps counts are integers
+            // anyway, so forcing 0 fraction digits here removes the main source of long labels — safe
+            // to call every refresh (idempotent), and only reachable from here since this is the one
+            // place secondScaleRequested is already true (see the NaN-pollution fix's KDoc above).
+            val stepsFormat = NumberFormat.getIntegerInstance(Locale.US).also { it.isGroupingUsed = false }
+            graph.secondScale.labelFormatter = DefaultLabelFormatter(stepsFormat, stepsFormat)
+        }
         val values = (overviewData.stepsCountGraphSeries as PointsWithLabelGraphSeries<DataPointWithLabelInterface>)
             .getValues(Double.NEGATIVE_INFINITY, Double.POSITIVE_INFINITY)
         val raw = mutableListOf<Pair<Double, Double>>() // x, real steps
@@ -376,7 +386,12 @@ class BoostV2GraphData @Inject constructor(
         // 100.0 fallback (no real data) mirrors addHeartRateLine's fallback; 1.15 = 15% headroom
         // so the tallest real bar isn't clipped at the very top of its band.
         val maxSteps = raw.maxOfOrNull { it.second } ?: 100.0
-        secondScaleMaxY = max(secondScaleMaxY, maxSteps * 1.15)
+        if (useForScale) {
+            minY = 0.0
+            maxY = max(1.0, maxSteps * 1.15)
+        } else {
+            secondScaleMaxY = max(secondScaleMaxY, maxSteps * 1.15)
+        }
         if (raw.isEmpty()) return
         // 3% of the day's own peak, floored at 1.0 so a near-flat/sedentary day (tiny maxSteps)
         // still gets a visible-but-clearly-minimal stub rather than an invisible sliver.
@@ -389,7 +404,7 @@ class BoostV2GraphData @Inject constructor(
         val barSeries = BarGraphSeries(points.toTypedArray()).also {
             it.setValueDependentColor { p -> if (p.realSteps <= 0.0) zeroColor else activeColor }
         }
-        secondScaleSeries.add(barSeries)
+        if (useForScale) addSeries(barSeries) else secondScaleSeries.add(barSeries)
     }
 
     /** [x]/[displayY] implement [DataPointInterface] for [BarGraphSeries]; [realSteps] is the

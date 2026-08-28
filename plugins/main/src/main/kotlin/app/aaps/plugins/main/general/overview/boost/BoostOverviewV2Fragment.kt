@@ -909,10 +909,11 @@ class BoostOverviewV2Fragment : DaggerFragment(), View.OnClickListener {
                 var useDSForScale = false
                 var useBGIForScale = false
                 var useHRForScale = false
-                // 2026-08-28 (user request): Steps no longer competes for the shared primary axis —
-                // it moved to its own independent graph.secondScale (see BoostV2GraphData.addStepsBars),
-                // which is what actually fixed the "Steps near 0 clipped below the HR-driven floor"
-                // complaint. No useSTEPSForScale needed any more.
+                // 2026-08-28 (user request): Steps doesn't compete for the primary axis in this
+                // when-chain — it moved to its own independent graph.secondScale (see
+                // BoostV2GraphData.addStepsBars), which is what actually fixed the "Steps near 0
+                // clipped below the HR-driven floor" complaint. It's decided separately below
+                // (stepsAlone), once it's known whether any of these flags ended up true.
                 when {
                     row[OverviewMenus.CharType.ABS.ordinal]      -> useABSForScale = true
                     row[OverviewMenus.CharType.IOB.ordinal]      -> useIobForScale = true
@@ -936,7 +937,15 @@ class BoostOverviewV2Fragment : DaggerFragment(), View.OnClickListener {
                 if (row[OverviewMenus.CharType.DEVSLOPE.ordinal] && config.isDev())
                     secondGraphData.addDeviationSlope(useDSForScale, if (useDSForScale) 1.0 else 0.8, useRatioForScale)
                 if (row[OverviewMenus.CharType.HR.ordinal]) secondGraphData.addHeartRateLine(useHRForScale, ctx)
-                if (row[OverviewMenus.CharType.STEPS.ordinal]) secondGraphData.addStepsBars(ctx)
+                // 2026-08-28 (user request, screenshot): a row showing ONLY Steps (nothing else
+                // claims the primary axis above) renders Steps directly on the primary axis instead
+                // of the shared secondScale one — avoids the "meaningless 0/0.5/1 placeholder on the
+                // left, real data stuck on the right" look. Any other series present (HR included)
+                // keeps Steps on its own independent secondScale axis, unchanged from before.
+                val stepsAlone = row[OverviewMenus.CharType.STEPS.ordinal] &&
+                    !(useABSForScale || useIobForScale || useCobForScale || useDevForScale ||
+                        useBGIForScale || useRatioForScale || useVarSensForScale || useDSForScale || useHRForScale)
+                if (row[OverviewMenus.CharType.STEPS.ordinal]) secondGraphData.addStepsBars(ctx, stepsAlone)
 
                 secondGraphData.addNowLine(now)
                 secondGraphData.formatAxis(overviewData.fromTime, overviewData.endTime)
