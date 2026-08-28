@@ -1199,8 +1199,8 @@ open class OpenAPSBoostV5Plugin @Inject constructor(
     // navigated into). Must stay in lock-step with the keys used in OpenAPSBoostPlugin's screens.
     private val prefScreenKeys = setOf(
         "openapsboostv5_settings", "boost_advanced_settings", "absorption_smb_advanced",
-        "boost_default_aaps_settings", "boost_dynisf_settings", "boost_floor_slew_shadow_settings",
-        "boost_peak_shadow_settings", "boost_exercise_settings",
+        "boost_default_aaps_settings", "boost_dynisf_settings", "boost_shadow_concepts_settings",
+        "boost_exercise_settings",
         "boost_stepcount_settings", "boost_hr_integration_settings",
         "boost_post_exercise_recovery_settings", "boost_hc_settings", "boost_meal_alcohol_buttons_settings",
         "boost_night_mode_settings", "boost_safety_settings",

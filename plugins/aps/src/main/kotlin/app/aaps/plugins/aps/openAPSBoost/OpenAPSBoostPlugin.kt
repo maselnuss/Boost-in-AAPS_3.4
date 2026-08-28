@@ -2997,7 +2997,7 @@ open class OpenAPSBoostPlugin @Inject constructor(
             requiredKey != "absorption_smb_advanced" &&
             requiredKey != "boost_default_aaps_settings" &&
             requiredKey != "boost_dynisf_settings" &&
-            requiredKey != "boost_floor_slew_shadow_settings" &&
+            requiredKey != "boost_shadow_concepts_settings" &&
             requiredKey != "boost_exercise_settings" &&
             requiredKey != "boost_stepcount_settings" &&
             requiredKey != "boost_hr_integration_settings" &&
@@ -3073,23 +3073,6 @@ open class OpenAPSBoostPlugin @Inject constructor(
                 addPreference(AdaptiveDoublePreference(ctx = context, doubleKey = DoubleKey.ApsBoostDynIsfVelocity, dialogMessage = R.string.boost_dynisf_velocity_summary, title = R.string.boost_dynisf_velocity_title))
                 addPreference(AdaptiveUnitPreference(ctx = context, unitKey = UnitDoubleKey.ApsBoostDynIsfBgCap, dialogMessage = R.string.boost_dynisf_bg_cap_summary, title = R.string.boost_dynisf_bg_cap_title))
                 addPreference(AdaptiveIntPreference(ctx = context, intKey = IntKey.ApsBoostDynIsfAdjustmentFactor, dialogMessage = R.string.boost_dynisf_adjust_factor_summary, title = R.string.boost_dynisf_adjust_factor_title))
-            })
-
-            // ── 3b. Floor/Slew Shadow (Konzept 1, 2026-08-26) ────────────
-            addPreference(preferenceManager.createPreferenceScreen(context).apply {
-                key = "boost_floor_slew_shadow_settings"
-                title = rh.gs(R.string.boost_floor_slew_shadow_title)
-                summary = rh.gs(R.string.boost_floor_slew_shadow_summary)
-                addPreference(AdaptiveSwitchPreference(ctx = context, booleanKey = BooleanKey.ApsBoostFloorSlewShadowEnabled, summary = R.string.boost_floor_slew_shadow_enabled_summary, title = R.string.boost_floor_slew_shadow_enabled_title))
-                addPreference(AdaptiveDoublePreference(ctx = context, doubleKey = DoubleKey.ApsBoostFloorSlewAggressiveness, dialogMessage = R.string.boost_floor_slew_aggressiveness_summary, title = R.string.boost_floor_slew_aggressiveness_title))
-            })
-
-            // ── 3c. Post-Meal Peak Shadow (Konzept 10, 2026-08-27) ────────
-            addPreference(preferenceManager.createPreferenceScreen(context).apply {
-                key = "boost_peak_shadow_settings"
-                title = rh.gs(R.string.boost_peak_shadow_title)
-                summary = rh.gs(R.string.boost_peak_shadow_summary)
-                addPreference(AdaptiveSwitchPreference(ctx = context, booleanKey = BooleanKey.ApsBoostPeakShadowCandidatesEnabled, summary = R.string.boost_peak_shadow_enabled_summary, title = R.string.boost_peak_shadow_enabled_title))
             })
 
             // ── 4. Exercise Settings (parent with nested sub-screens) ────
@@ -3246,6 +3229,24 @@ open class OpenAPSBoostPlugin @Inject constructor(
                         title = R.string.openapsama_current_basal_safety_multiplier
                     )
                 )
+
+                // ── 7a. Shadow Concepts — home for all pure-computation SHADOW-ONLY concepts
+                //     (Konzept 1, Konzept 10, ...). Nothing here ever touches dosing/target — every
+                //     entry only reads already-available cycle data and logs a comparison. GPS
+                //     activity detection (Konzept 8) deliberately lives OUTSIDE this screen, under
+                //     Health Connect Settings — it registers a live Android OS listener/permission,
+                //     a different kind of thing from a pure computed estimate, even though its
+                //     dosing impact is currently also shadow-only.
+                addPreference(preferenceManager.createPreferenceScreen(context).apply {
+                    key = "boost_shadow_concepts_settings"
+                    title = rh.gs(R.string.boost_shadow_concepts_title)
+                    summary = rh.gs(R.string.boost_shadow_concepts_summary)
+                    // Konzept 1 (2026-08-26) — see BoostFloorSlewShadow.kt.
+                    addPreference(AdaptiveSwitchPreference(ctx = context, booleanKey = BooleanKey.ApsBoostFloorSlewShadowEnabled, summary = R.string.boost_floor_slew_shadow_enabled_summary, title = R.string.boost_floor_slew_shadow_enabled_title))
+                    addPreference(AdaptiveDoublePreference(ctx = context, doubleKey = DoubleKey.ApsBoostFloorSlewAggressiveness, dialogMessage = R.string.boost_floor_slew_aggressiveness_summary, title = R.string.boost_floor_slew_aggressiveness_title))
+                    // Konzept 10 (2026-08-27) — see BoostOvershootGuardShadow.kt.
+                    addPreference(AdaptiveSwitchPreference(ctx = context, booleanKey = BooleanKey.ApsBoostPeakShadowCandidatesEnabled, summary = R.string.boost_peak_shadow_enabled_summary, title = R.string.boost_peak_shadow_enabled_title))
+                })
             })
         }
     }
