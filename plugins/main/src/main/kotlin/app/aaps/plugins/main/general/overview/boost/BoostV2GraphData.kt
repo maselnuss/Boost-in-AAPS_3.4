@@ -106,6 +106,15 @@ class BoostV2GraphData @Inject constructor(
          *  applyV2Theme() re-applies this to the BG & IOB graphs on every refresh, so this
          *  constant (not the one-time onViewCreated setup) is the effective colour. */
         val LABEL_COLOR = Color.parseColor("#aaaaaa")
+
+        /** 2026-08-28: gap threshold for [addHeartRateLine] — a break in HR readings (watch off
+         *  wrist, Bluetooth drop) longer than this starts a new line segment instead of drawing a
+         *  straight line across the gap. Normal Wear sampling is 1-5 min, so 15 min is comfortably
+         *  above sampling jitter while still catching real gaps of an hour+ well before they'd
+         *  otherwise get silently bridged. */
+        // Double, not Long: compared directly against DataPoint.getX() (graph X coordinates are
+        // epoch-millis as Double) — Kotlin has no implicit Double/Long comparison.
+        const val HR_GAP_THRESHOLD_MS = 15 * 60_000.0
     }
 
     // ── Internal state (mirrors GraphData) ───────────────────────────────
@@ -113,6 +122,14 @@ class BoostV2GraphData @Inject constructor(
     private var minY = Double.MAX_VALUE
     private val units: GlucoseUnit get() = profileFunction.getUnits()
     private val series: MutableList<Series<*>> = ArrayList()
+
+    /** 2026-08-28: series destined for `graph.secondScale` (currently: Steps bars) — kept separate
+     *  from [series] because `GraphView.removeAllSeries()` does NOT clear `secondScale`'s own series
+     *  list (verified by reading GraphView.java directly — it only iterates `mSeries`), so
+     *  [performUpdate] must clear/re-add secondScale's series itself each refresh or old bars would
+     *  pile up indefinitely. */
+    private val secondScaleSeries: MutableList<Series<*>> = ArrayList()
+    private var secondScaleMaxY = 1.0
 
     private lateinit var graph: GraphView
     private lateinit var overviewData: OverviewData
@@ -251,24 +268,102 @@ class BoostV2GraphData @Inject constructor(
         addSeries(overviewData.varSensSeries as LineGraphSeries<ScaledDataPoint>)
     }
 
-    fun addHeartRate(useForScale: Boolean, scale: Double) {
-        val maxHR = (overviewData.heartRateGraphSeries as PointsWithLabelGraphSeries<DataPointWithLabelInterface>).highestValueY
+    /**
+     * V2-specific (2026-08-28, user request): HR as a real connected LINE on the PRIMARY axis,
+     * instead of the shared-axis floating-tick rendering `addHeartRate` used. Segmented at real
+     * data gaps (watch off wrist etc. — [HR_GAP_THRESHOLD_MS]) so a break in readings shows as a
+     * visible gap, never a straight line silently bridging hours of no data (LineGraphSeries itself
+     * has no gap awareness — draw() in the vendored jjoe64 lib always connects consecutive points,
+     * verified by reading it directly). Reads the SAME underlying series
+     * (`overviewData.heartRateGraphSeries`, populated by `PrepareTreatmentsDataWorker`) via the
+     * public `getValues()` — does not touch or duplicate the shared data-prep pipeline, so the
+     * stock (non-Boost) Overview screen is unaffected. Steps moves to `graph.secondScale` (see
+     * [addStepsBars]) so the two no longer fight over one shared axis (root cause of the original
+     * complaint: Steps values near 0 were clipped below the HR-driven viewport floor).
+     */
+    fun addHeartRateLine(useForScale: Boolean, context: Context?) {
+        val values = (overviewData.heartRateGraphSeries as PointsWithLabelGraphSeries<DataPointWithLabelInterface>)
+            .getValues(Double.NEGATIVE_INFINITY, Double.POSITIVE_INFINITY)
+        val points = mutableListOf<DataPoint>()
+        while (values.hasNext()) {
+            val v = values.next() ?: break
+            points.add(DataPoint(v.getX(), v.getY()))
+        }
+        if (points.isEmpty()) return
+        val maxHR = points.maxOf { it.getY() }
         if (useForScale) {
             minY = 30.0
             maxY = maxHR
         }
-        addSeries(overviewData.heartRateGraphSeries as PointsWithLabelGraphSeries<DataPointWithLabelInterface>)
-        overviewData.heartRateScale.multiplier = maxY * scale / maxHR
+        val color = rh.gac(context, app.aaps.core.ui.R.attr.heartRateColor)
+        var segment = mutableListOf(points[0])
+        for (i in 1 until points.size) {
+            if (points[i].getX() - points[i - 1].getX() > HR_GAP_THRESHOLD_MS) {
+                addHrLineSegment(segment, color)
+                segment = mutableListOf()
+            }
+            segment.add(points[i])
+        }
+        addHrLineSegment(segment, color)
     }
 
-    fun addSteps(useForScale: Boolean, scale: Double) {
-        val maxSteps = (overviewData.stepsCountGraphSeries as PointsWithLabelGraphSeries<DataPointWithLabelInterface>).highestValueY
-        if (useForScale) {
-            minY = 0.0
-            maxY = maxSteps
+    /** A single unbroken run of HR readings (no gap > [HR_GAP_THRESHOLD_MS] inside it). Segments
+     *  with a single point can't form a line (nothing to connect to) and are dropped. */
+    private fun addHrLineSegment(segment: List<DataPoint>, color: Int) {
+        if (segment.size < 2) return
+        addSeries(
+            LineGraphSeries(segment.toTypedArray()).also {
+                it.color = color
+                it.thickness = 4
+            }
+        )
+    }
+
+    /**
+     * V2-specific (2026-08-28, user request): Steps as a real bar chart (`BarGraphSeries`, bars
+     * grow from a 0 baseline — matches Google Fit/Apple Health convention, unlike `addSteps`'s
+     * floating ticks) on its own independent `graph.secondScale` axis — never shares scale with HR
+     * or anything else on the row. Zero-step buckets get a small forced-visible stub height (bars
+     * at height 0 render as literally nothing, indistinguishable from a missing sample) in a dimmed
+     * grey via [ValueDependentColor], so "0 steps, actually measured" reads differently from "no
+     * data here at all" at a glance. Real (unclamped) step count drives the colour decision, not
+     * the display height — see [StepsBarPoint].
+     */
+    fun addStepsBars(context: Context?) {
+        val values = (overviewData.stepsCountGraphSeries as PointsWithLabelGraphSeries<DataPointWithLabelInterface>)
+            .getValues(Double.NEGATIVE_INFINITY, Double.POSITIVE_INFINITY)
+        val raw = mutableListOf<Pair<Double, Double>>() // x, real steps
+        while (values.hasNext()) {
+            val v = values.next() ?: break
+            raw.add(v.getX() to v.getY())
         }
-        addSeries(overviewData.stepsCountGraphSeries as PointsWithLabelGraphSeries<DataPointWithLabelInterface>)
-        overviewData.stepsForScale.multiplier = maxY * scale / maxSteps
+        if (raw.isEmpty()) return
+        val maxSteps = raw.maxOf { it.second }
+        // 3% of the day's own peak, floored at 1.0 so a near-flat/sedentary day (tiny maxSteps)
+        // still gets a visible-but-clearly-minimal stub rather than an invisible sliver.
+        val zeroStubHeight = max(maxSteps * 0.03, 1.0)
+        val points = raw.map { (x, realSteps) ->
+            StepsBarPoint(x = x, realSteps = realSteps, displayY = if (realSteps <= 0.0) zeroStubHeight else realSteps)
+        }
+        val activeColor = rh.gac(context, app.aaps.core.ui.R.attr.stepsColor)
+        val zeroColor = Color.argb(140, 170, 170, 170) // dimmed grey — "measured, but zero"
+        val barSeries = BarGraphSeries(points.toTypedArray()).also {
+            it.setValueDependentColor { p -> if (p.realSteps <= 0.0) zeroColor else activeColor }
+        }
+        secondScaleSeries.add(barSeries)
+        secondScaleMaxY = max(secondScaleMaxY, maxSteps * 1.15) // 15% headroom so the tallest bar isn't clipped at the very top
+    }
+
+    /** [x]/[displayY] implement [DataPointInterface] for [BarGraphSeries]; [realSteps] is the
+     *  actual (never height-clamped) step count, read by the `ValueDependentColor` callback in
+     *  [addStepsBars] to tell a true zero apart from a forced-visible stub. */
+    private class StepsBarPoint(
+        private val x: Double,
+        private val displayY: Double,
+        val realSteps: Double,
+    ) : com.jjoe64.graphview.series.DataPointInterface {
+        override fun getX() = x
+        override fun getY() = displayY
     }
 
     // ── V2-styled methods (overridden colours) ───────────────────────────
@@ -528,7 +623,39 @@ class BoostV2GraphData @Inject constructor(
         graph.viewport.setMinY(Round.floorTo(minY, step))
         graph.viewport.isYAxisBoundsManual = true
 
+        // 2026-08-28: secondScale (currently: Steps bars). Two things verified by reading
+        // GraphView.java directly, not assumed:
+        //  1. GraphView.removeAllSeries() above does NOT touch secondScale's own series list — old
+        //     series must be detached + cleared here manually, every refresh, or bars pile up forever.
+        //  2. graph.secondScale is a lazy getter (GraphView.getSecondScale()): the FIRST touch —
+        //     even just reading it to check whether it's empty — permanently instantiates it, and
+        //     from then on GraphView unconditionally reserves right-axis label width
+        //     (getGraphContentWidth()) and draws the (empty) right axis on THIS GraphView object
+        //     forever, with no way to undo it (no public reset). So secondScale must be left
+        //     completely untouched on rows that never show Steps — including the "just checking if
+        //     it's empty to clean up" case — or every non-Steps row (IOB/COB/... only) would grow an
+        //     unwanted empty axis the first time it happened to run through this code path.
+        //     Accepted trade-off: if a row HAD Steps and is then reconfigured to drop it (rare —
+        //     chart-type selection isn't normally changed live between refreshes), the last-drawn
+        //     bars/axis stay on screen until the Fragment is recreated rather than being cleaned up
+        //     — better than every Steps-less row permanently growing an axis the moment it's ever
+        //     touched.
+        if (secondScaleSeries.isNotEmpty()) {
+            for (s in graph.secondScale.series) s.onGraphViewDetached(graph)
+            graph.secondScale.series.clear()
+            for (s in secondScaleSeries) {
+                if (!s.isEmpty) {
+                    s.onGraphViewAttached(graph)
+                    graph.secondScale.addSeries(s)
+                }
+            }
+            graph.secondScale.minY = 0.0
+            graph.secondScale.maxY = secondScaleMaxY
+        }
+
         graph.onDataChanged(false, false)
         series.clear()
+        secondScaleSeries.clear()
+        secondScaleMaxY = 1.0
     }
 }

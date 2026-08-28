@@ -908,7 +908,10 @@ class BoostOverviewV2Fragment : DaggerFragment(), View.OnClickListener {
                 var useDSForScale = false
                 var useBGIForScale = false
                 var useHRForScale = false
-                var useSTEPSForScale = false
+                // 2026-08-28 (user request): Steps no longer competes for the shared primary axis —
+                // it moved to its own independent graph.secondScale (see BoostV2GraphData.addStepsBars),
+                // which is what actually fixed the "Steps near 0 clipped below the HR-driven floor"
+                // complaint. No useSTEPSForScale needed any more.
                 when {
                     row[OverviewMenus.CharType.ABS.ordinal]      -> useABSForScale = true
                     row[OverviewMenus.CharType.IOB.ordinal]      -> useIobForScale = true
@@ -919,7 +922,6 @@ class BoostOverviewV2Fragment : DaggerFragment(), View.OnClickListener {
                     row[OverviewMenus.CharType.VAR_SEN.ordinal]  -> useVarSensForScale = true
                     row[OverviewMenus.CharType.DEVSLOPE.ordinal] -> useDSForScale = true
                     row[OverviewMenus.CharType.HR.ordinal]       -> useHRForScale = true
-                    row[OverviewMenus.CharType.STEPS.ordinal]    -> useSTEPSForScale = true
                 }
                 val alignDevBgiScale = row[OverviewMenus.CharType.DEV.ordinal] && row[OverviewMenus.CharType.BGI.ordinal]
 
@@ -932,8 +934,8 @@ class BoostOverviewV2Fragment : DaggerFragment(), View.OnClickListener {
                 if (row[OverviewMenus.CharType.VAR_SEN.ordinal]) secondGraphData.addVarSens(useVarSensForScale, if (useVarSensForScale) 1.0 else 0.8)
                 if (row[OverviewMenus.CharType.DEVSLOPE.ordinal] && config.isDev())
                     secondGraphData.addDeviationSlope(useDSForScale, if (useDSForScale) 1.0 else 0.8, useRatioForScale)
-                if (row[OverviewMenus.CharType.HR.ordinal]) secondGraphData.addHeartRate(useHRForScale, if (useHRForScale) 1.0 else 0.8)
-                if (row[OverviewMenus.CharType.STEPS.ordinal]) secondGraphData.addSteps(useSTEPSForScale, if (useSTEPSForScale) 1.0 else 0.8)
+                if (row[OverviewMenus.CharType.HR.ordinal]) secondGraphData.addHeartRateLine(useHRForScale, ctx)
+                if (row[OverviewMenus.CharType.STEPS.ordinal]) secondGraphData.addStepsBars(ctx)
 
                 secondGraphData.addNowLine(now)
                 secondGraphData.formatAxis(overviewData.fromTime, overviewData.endTime)
