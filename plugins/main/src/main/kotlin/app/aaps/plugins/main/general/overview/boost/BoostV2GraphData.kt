@@ -150,6 +150,11 @@ class BoostV2GraphData @Inject constructor(
     private val secondScaleSeries: MutableList<Series<*>> = ArrayList()
     private var secondScaleMaxY = 1.0
 
+    /** 2026-08-28: true once [addStepsBars] has run for this row (regardless of whether it found
+     *  any data) — distinguishes "this row wants Steps, currently empty, still show an axis" from
+     *  "this row never asked for Steps, leave secondScale untouched" (see [performUpdate]). */
+    private var secondScaleRequested = false
+
     private lateinit var graph: GraphView
     private lateinit var overviewData: OverviewData
 
@@ -377,6 +382,13 @@ class BoostV2GraphData @Inject constructor(
      * the display height — see [StepsBarPoint].
      */
     fun addStepsBars(context: Context?) {
+        // 2026-08-28: set BEFORE the empty check (found via screenshot after the NaN fix: HR now
+        // shows a sane fallback axis with zero data, but Steps showed no axis at all — inconsistent,
+        // since this row DID request Steps, it's just temporarily empty, not a row that never wanted
+        // Steps). [secondScaleRequested] lets performUpdate() distinguish "this row wants Steps but
+        // has none right now" (still show an empty axis, matching HR's fallback) from "this row never
+        // had addStepsBars called at all" (never touch secondScale — see the NaN-pollution fix above).
+        secondScaleRequested = true
         val values = (overviewData.stepsCountGraphSeries as PointsWithLabelGraphSeries<DataPointWithLabelInterface>)
             .getValues(Double.NEGATIVE_INFINITY, Double.POSITIVE_INFINITY)
         val raw = mutableListOf<Pair<Double, Double>>() // x, real steps
@@ -384,8 +396,11 @@ class BoostV2GraphData @Inject constructor(
             val v = values.next() ?: break
             raw.add(v.getX() to v.getY())
         }
+        // 100.0 fallback (no real data) mirrors addHeartRateLine's fallback; 1.15 = 15% headroom
+        // so the tallest real bar isn't clipped at the very top of its band.
+        val maxSteps = raw.maxOfOrNull { it.second } ?: 100.0
+        secondScaleMaxY = max(secondScaleMaxY, maxSteps * 1.15)
         if (raw.isEmpty()) return
-        val maxSteps = raw.maxOf { it.second }
         // 3% of the day's own peak, floored at 1.0 so a near-flat/sedentary day (tiny maxSteps)
         // still gets a visible-but-clearly-minimal stub rather than an invisible sliver.
         val zeroStubHeight = max(maxSteps * 0.03, 1.0)
@@ -398,7 +413,6 @@ class BoostV2GraphData @Inject constructor(
             it.setValueDependentColor { p -> if (p.realSteps <= 0.0) zeroColor else activeColor }
         }
         secondScaleSeries.add(barSeries)
-        secondScaleMaxY = max(secondScaleMaxY, maxSteps * 1.15) // 15% headroom so the tallest bar isn't clipped at the very top
     }
 
     /** [x]/[displayY] implement [DataPointInterface] for [BarGraphSeries]; [realSteps] is the
@@ -695,8 +709,11 @@ class BoostV2GraphData @Inject constructor(
         //     chart-type selection isn't normally changed live between refreshes), the last-drawn
         //     bars/axis stay on screen until the Fragment is recreated rather than being cleaned up
         //     — better than every Steps-less row permanently growing an axis the moment it's ever
-        //     touched.
-        if (secondScaleSeries.isNotEmpty()) {
+        //     touched. Gated on [secondScaleRequested] (was addStepsBars called this row at all?),
+        //     NOT on secondScaleSeries.isEmpty() — a row that wants Steps but currently has zero
+        //     data should still show an empty axis (parity with addHeartRateLine's fallback), not
+        //     vanish entirely.
+        if (secondScaleRequested) {
             for (s in graph.secondScale.series) s.onGraphViewDetached(graph)
             graph.secondScale.series.clear()
             for (s in secondScaleSeries) {
@@ -713,5 +730,6 @@ class BoostV2GraphData @Inject constructor(
         series.clear()
         secondScaleSeries.clear()
         secondScaleMaxY = 1.0
+        secondScaleRequested = false
     }
 }
