@@ -1036,7 +1036,7 @@ open class OpenAPSBoostV5Plugin @Inject constructor(
         //    Build it fully BEFORE attaching to the category. ──
         val advanced = preferenceManager.createPreferenceScreen(context).apply {
             key = "boost_advanced_settings"
-            title = rh.gs(app.aaps.core.ui.R.string.advanced_settings_title)
+            title = rh.gs(R.string.boost_v5_advanced_settings_title)
             addPreference(AdaptiveDoublePreference(ctx = context, doubleKey = DoubleKey.ApsBoostV5Sensitivity, dialogMessage = R.string.boost_v5_sensitivity_summary, title = R.string.boost_v5_sensitivity_title))
             addPreference(AdaptiveDoublePreference(ctx = context, doubleKey = DoubleKey.ApsBoostV5ConfirmedCapU, dialogMessage = R.string.boost_v5_confirmed_cap_summary, title = R.string.boost_v5_confirmed_cap_title))
             addPreference(AdaptiveDoublePreference(ctx = context, doubleKey = DoubleKey.ApsBoostV5CommittedCapU, dialogMessage = R.string.boost_v5_committed_cap_summary, title = R.string.boost_v5_committed_cap_title))
