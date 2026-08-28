@@ -44,22 +44,6 @@
         android:layout_marginBottom="8dp"
         android:max="255" />
 
-    <TextView
-        android:layout_width="wrap_content"
-        android:layout_height="wrap_content"
-        android:layout_gravity="center_horizontal"
-        android:layout_marginBottom="8dp"
-        android:gravity="center_horizontal"
-        android:labelFor="@id/cornerRadiusSeekBar"
-        android:text="@string/configure_corner_radius" />
-
-    <SeekBar
-        android:id="@+id/cornerRadiusSeekBar"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:layout_marginBottom="8dp"
-        android:max="32" />
-
     <CheckBox
         android:id="@+id/useBlack"
         android:layout_width="wrap_content"

@@ -120,7 +120,6 @@ class BoostWidget : AppWidgetProvider() {
         val views = RemoteViews(context.packageName, R.layout.boost_widget_layout)
         val alpha = preferences.get(IntComposedKey.WidgetOpacity, appWidgetId)
         val useBlack = preferences.get(BooleanComposedKey.WidgetUseBlack, appWidgetId)
-        val cornerRadiusDp = preferences.get(IntComposedKey.WidgetCornerRadius, appWidgetId)
 
         val intent = Intent(context, uiInteraction.mainActivity).also { it.action = intentAction }
         val pendingIntent = PendingIntent.getActivity(context, 0, intent, PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
@@ -128,18 +127,6 @@ class BoostWidget : AppWidgetProvider() {
 
         if (config.APS || useBlack)
             views.setInt(R.id.boost_widget_layout, "setBackgroundColor", Color.argb(alpha, 0, 0, 0))
-        // 2026-08-28 (user request): setBackgroundColor above ALWAYS replaces whatever background
-        // shape boost_widget_layout.xml declared (including boost_widget_background.xml's rounded
-        // corners) with a flat, sharp-cornered ColorDrawable — this ran unconditionally for every
-        // real closed-loop user (config.APS is true for them), which is why the XML-level rounding
-        // fix alone never actually showed up. Corner rounding is intentionally handled as a
-        // SEPARATE, decoupled concern here — clip the whole view to a rounded-rect outline via the
-        // dedicated widget-rounding API (added API 31, minSdk for this app is already 31, so no
-        // version guard needed) — this clips whatever the background ends up being (flat colour OR
-        // the XML shape, doesn't matter which), so it can't be silently defeated by the opacity
-        // branch above again.
-        views.setBoolean(R.id.boost_widget_layout, "setClipToOutline", true)
-        views.setViewOutlinePreferredRadius(R.id.boost_widget_layout, cornerRadiusDp.toFloat(), TypedValue.COMPLEX_UNIT_DIP)
 
         // Compute text sizes based on actual widget dimensions
         val options = appWidgetManager.getAppWidgetOptions(appWidgetId)

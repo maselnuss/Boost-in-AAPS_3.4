@@ -41,16 +41,6 @@ class WidgetConfigureActivity : DaggerActivity() {
             }
         })
 
-        // 2026-08-28 (user request): ported from BoostWidgetConfigureActivity, same pattern.
-        binding.cornerRadiusSeekBar.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
-            override fun onStopTrackingTouch(seekBar: SeekBar) {}
-            override fun onStartTrackingTouch(seekBar: SeekBar) {}
-            override fun onProgressChanged(seekBar: SeekBar, progress: Int, fromUser: Boolean) {
-                preferences.put(IntComposedKey.WidgetCornerRadius, appWidgetId, value = progress)
-                Widget.updateWidget(this@WidgetConfigureActivity, "WidgetConfigure")
-            }
-        })
-
         binding.closeLayout.close.setOnClickListener {
             // Make sure we pass back the original appWidgetId
             val resultValue = Intent()
@@ -74,14 +64,12 @@ class WidgetConfigureActivity : DaggerActivity() {
         }
 
         binding.seekBar.progress = preferences.get(IntComposedKey.WidgetOpacity, appWidgetId)
-        binding.cornerRadiusSeekBar.progress = preferences.get(IntComposedKey.WidgetCornerRadius, appWidgetId)
         binding.useBlack.isChecked = preferences.get(BooleanComposedKey.WidgetUseBlack, appWidgetId)
     }
 
     override fun onDestroy() {
         super.onDestroy()
         binding.seekBar.setOnSeekBarChangeListener(null)
-        binding.cornerRadiusSeekBar.setOnSeekBarChangeListener(null)
         binding.closeLayout.close.setOnClickListener(null)
         binding.useBlack.setOnCheckedChangeListener(null)
     }
