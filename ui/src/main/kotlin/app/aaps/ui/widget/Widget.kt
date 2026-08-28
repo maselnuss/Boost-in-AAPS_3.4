@@ -10,6 +10,7 @@ import android.graphics.Color
 import android.graphics.Paint
 import android.os.Handler
 import android.os.HandlerThread
+import android.util.TypedValue
 import android.view.View
 import android.widget.RemoteViews
 import app.aaps.core.data.model.GlucoseUnit
@@ -134,6 +135,17 @@ class Widget : AppWidgetProvider() {
             views.setInt(R.id.widget_layout, "setBackgroundColor", Color.argb(alpha, 0xE8, 0xC5, 0x0C))
         else if (config.AAPSCLIENT2)
             views.setInt(R.id.widget_layout, "setBackgroundColor", Color.argb(alpha, 0x0F, 0xBB, 0xE0))
+        // 2026-08-28 (user request): ported from BoostWidget.kt — same reasoning applies here.
+        // setBackgroundColor above always replaces widget_background.xml's own rounded corners with
+        // a flat ColorDrawable for real closed-loop/AAPSCLIENT users. Corner rounding handled as a
+        // separate, decoupled concern via the dedicated widget-rounding API (API 31+; this app's
+        // minSdk is already 31). Shares IntComposedKey.WidgetCornerRadius with the Boost widget —
+        // safe, since Android's appWidgetId is globally unique per widget instance regardless of
+        // widget type, so the composed key ("appwidget_corner_radius_" + appWidgetId) never collides
+        // between a Boost widget instance and a stock widget instance.
+        val cornerRadiusDp = preferences.get(IntComposedKey.WidgetCornerRadius, appWidgetId)
+        views.setBoolean(R.id.widget_layout, "setClipToOutline", true)
+        views.setViewOutlinePreferredRadius(R.id.widget_layout, cornerRadiusDp.toFloat(), TypedValue.COMPLEX_UNIT_DIP)
 
         handler.post {
             if (config.appInitialized) {
