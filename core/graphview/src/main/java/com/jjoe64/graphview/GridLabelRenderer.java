@@ -692,13 +692,30 @@ public class GridLabelRenderer {
             return;
         }
 
-        // test label
-        double testY = ((mGraphView.mSecondScale.getMaxY() - mGraphView.mSecondScale.getMinY()) * 0.783) + mGraphView.mSecondScale.getMinY();
-        String testLabel = mGraphView.mSecondScale.getLabelFormatter().formatLabel(testY, false);
+        // 2026-08-28 fix (user-reported clipped right-axis labels, e.g. a 3-digit max value like
+        // "115" cut off at the screen edge while shorter values below it rendered fine): this
+        // method only ever measured ONE sample label at the 78.3%-of-range position, never the
+        // actual highest/lowest value shown, and added NO safety margin — unlike
+        // calcLabelVerticalSize() above (the LEFT axis' equivalent), which tests both extremes,
+        // takes the wider one, and adds a 6px pad plus mStyles.labelsSpace. Mirrored that same
+        // approach here so the right axis reserves enough width for whatever it actually renders,
+        // not just a single mid-range sample.
+        String testLabel = mGraphView.mSecondScale.getLabelFormatter().formatLabel(mGraphView.mSecondScale.getMaxY(), false);
+        if (testLabel == null) testLabel = "";
         Rect textBounds = new Rect();
         mPaintLabel.getTextBounds(testLabel, 0, testLabel.length(), textBounds);
         mLabelVerticalSecondScaleWidth = textBounds.width();
         mLabelVerticalSecondScaleHeight = textBounds.height();
+
+        testLabel = mGraphView.mSecondScale.getLabelFormatter().formatLabel(mGraphView.mSecondScale.getMinY(), false);
+        if (testLabel == null) testLabel = "";
+        mPaintLabel.getTextBounds(testLabel, 0, testLabel.length(), textBounds);
+        mLabelVerticalSecondScaleWidth = Math.max(mLabelVerticalSecondScaleWidth, textBounds.width());
+
+        // add some pixel to get a margin (matches calcLabelVerticalSize's own +6)
+        mLabelVerticalSecondScaleWidth += 6;
+        // space between text and graph content (matches calcLabelVerticalSize's own labelsSpace)
+        mLabelVerticalSecondScaleWidth += mStyles.labelsSpace;
 
         // multiline
         int lines = 1;
