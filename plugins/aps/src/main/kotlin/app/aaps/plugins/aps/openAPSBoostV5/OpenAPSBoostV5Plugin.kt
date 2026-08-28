@@ -1302,7 +1302,8 @@ open class OpenAPSBoostV5Plugin @Inject constructor(
             summary = rh.gs(R.string.boost_shadow_concepts_summary)
             addPreference(AdaptiveSwitchPreference(ctx = context, booleanKey = BooleanKey.ApsBoostFloorSlewShadowEnabled, summary = R.string.boost_floor_slew_shadow_enabled_summary, title = R.string.boost_floor_slew_shadow_enabled_title))
             addPreference(AdaptiveDoublePreference(ctx = context, doubleKey = DoubleKey.ApsBoostFloorSlewAggressiveness, dialogMessage = R.string.boost_floor_slew_aggressiveness_summary, title = R.string.boost_floor_slew_aggressiveness_title))
-            addPreference(AdaptiveSwitchPreference(ctx = context, booleanKey = BooleanKey.ApsBoostPeakShadowCandidatesEnabled, summary = R.string.boost_peak_shadow_enabled_summary, title = R.string.boost_peak_shadow_enabled_title))
+            addPreference(AdaptiveSwitchPreference(ctx = context, booleanKey = BooleanKey.ApsBoostRecoveringBackoffShadowEnabled, summary = R.string.boost_recovering_backoff_shadow_enabled_summary, title = R.string.boost_recovering_backoff_shadow_enabled_title))
+            addPreference(AdaptiveSwitchPreference(ctx = context, booleanKey = BooleanKey.ApsBoostOvershootGuardShadowEnabled, summary = R.string.boost_overshoot_guard_shadow_enabled_summary, title = R.string.boost_overshoot_guard_shadow_enabled_title))
         })
         // Undo safety net (2026-08-27, user request) — restore the managed knobs to their state
         // from immediately before the last (or 2nd-last) automatic AutoConfig/Periodic Review

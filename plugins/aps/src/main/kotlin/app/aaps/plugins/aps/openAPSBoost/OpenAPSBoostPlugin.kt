@@ -355,7 +355,8 @@ open class OpenAPSBoostPlugin @Inject constructor(
     private val floorSlewShadowEnabled; get() = preferences.getBoostDosing(BooleanKey.ApsBoostFloorSlewShadowEnabled)
     private val floorSlewAggressiveness; get() = preferences.getBoostDosing(DoubleKey.ApsBoostFloorSlewAggressiveness)
     // Konzept 10 (2026-08-27) — see BoostOvershootGuardShadow.kt + recoveringShadow= call site.
-    private val peakShadowCandidatesEnabled; get() = preferences.getBoostDosing(BooleanKey.ApsBoostPeakShadowCandidatesEnabled)
+    private val recoveringBackoffShadowEnabled; get() = preferences.getBoostDosing(BooleanKey.ApsBoostRecoveringBackoffShadowEnabled)
+    private val overshootGuardShadowEnabled; get() = preferences.getBoostDosing(BooleanKey.ApsBoostOvershootGuardShadowEnabled)
     private val postExerciseMinDuration; get() = preferences.getBoostDosing(IntKey.ApsBoostPostExerciseMinDuration)
 
     // ---- Feed-health edge detection (F4/F6, 2026-07-07) ----
@@ -1195,7 +1196,7 @@ open class OpenAPSBoostPlugin @Inject constructor(
         // used for the recoveringShadow=/aimiGuardShadow=-successor logic above (fails closed: a
         // record without that tag, e.g. from before it existed, is simply skipped like unparseable
         // eventualBG).
-        if (peakShadowCandidatesEnabled && now - lastOvershootGuardComputeMs >= overshootGuardRecomputeIntervalMs) {
+        if (overshootGuardShadowEnabled && now - lastOvershootGuardComputeMs >= overshootGuardRecomputeIntervalMs) {
             lastOvershootGuardComputeMs = now
             try {
                 val since = now - 14 * 24 * 3600_000L
@@ -2129,8 +2130,8 @@ open class OpenAPSBoostPlugin @Inject constructor(
             // logged separately so the guard's real hit rate can be validated against live data
             // before any dosing change is considered. Never affects dosing; only logged while V5
             // currently holds COMMITTED (the only state this predicate is evaluated in). Gated
-            // behind ApsBoostPeakShadowCandidatesEnabled (default off) — see the preference screen.
-            if (peakShadowCandidatesEnabled) {
+            // behind ApsBoostRecoveringBackoffShadowEnabled (default off) — see the preference screen.
+            if (recoveringBackoffShadowEnabled) {
                 runCatching {
                     if (v5decision?.mealHypothesis == MealHypothesis.COMMITTED) {
                         val short = glucoseStatus.shortAvgDelta
@@ -2161,8 +2162,8 @@ open class OpenAPSBoostPlugin @Inject constructor(
             //    below) — "n/a" until MIN_SAMPLES_FOR_ESTIMATE rolling samples are available.
             // Both logged against the ACTUAL delivered dose (v5decision.phase3.finalDose) for
             // comparison. Never applied — never affects dosing. Gated behind
-            // ApsBoostPeakShadowCandidatesEnabled (default off) — see the preference screen.
-            if (peakShadowCandidatesEnabled) {
+            // ApsBoostOvershootGuardShadowEnabled (default off) — see the preference screen.
+            if (overshootGuardShadowEnabled) {
                 runCatching {
                     v5decision?.let { d ->
                         if (d.mealHypothesis == MealHypothesis.COMMITTED) {
@@ -3266,7 +3267,8 @@ open class OpenAPSBoostPlugin @Inject constructor(
                     addPreference(AdaptiveSwitchPreference(ctx = context, booleanKey = BooleanKey.ApsBoostFloorSlewShadowEnabled, summary = R.string.boost_floor_slew_shadow_enabled_summary, title = R.string.boost_floor_slew_shadow_enabled_title))
                     addPreference(AdaptiveDoublePreference(ctx = context, doubleKey = DoubleKey.ApsBoostFloorSlewAggressiveness, dialogMessage = R.string.boost_floor_slew_aggressiveness_summary, title = R.string.boost_floor_slew_aggressiveness_title))
                     // Konzept 10 (2026-08-27) — see BoostOvershootGuardShadow.kt.
-                    addPreference(AdaptiveSwitchPreference(ctx = context, booleanKey = BooleanKey.ApsBoostPeakShadowCandidatesEnabled, summary = R.string.boost_peak_shadow_enabled_summary, title = R.string.boost_peak_shadow_enabled_title))
+                    addPreference(AdaptiveSwitchPreference(ctx = context, booleanKey = BooleanKey.ApsBoostRecoveringBackoffShadowEnabled, summary = R.string.boost_recovering_backoff_shadow_enabled_summary, title = R.string.boost_recovering_backoff_shadow_enabled_title))
+                    addPreference(AdaptiveSwitchPreference(ctx = context, booleanKey = BooleanKey.ApsBoostOvershootGuardShadowEnabled, summary = R.string.boost_overshoot_guard_shadow_enabled_summary, title = R.string.boost_overshoot_guard_shadow_enabled_title))
                 })
             })
         }

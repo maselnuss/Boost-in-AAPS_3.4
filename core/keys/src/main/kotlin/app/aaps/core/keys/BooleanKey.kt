@@ -90,11 +90,18 @@ enum class BooleanKey(
     // Konzept 1 (2026-08-26) — SHADOW ONLY. Rolling ISF-floor/slew-limiter estimate from recent
     // dosing history (see BoostFloorSlewShadow.kt) — logs a suggested floor%/slew%, never applies it.
     ApsBoostFloorSlewShadowEnabled("boost_floor_slew_shadow_enabled", false, defaultedBySM = true),
-    // Konzept 10 (2026-08-27) — SHADOW ONLY. Post-meal peak/rebound backoff candidates: a looser
-    // COMMITTED->RECOVERING backoff (recoveringShadow=) and two continuous overshoot-dampening
-    // variants, fixed + self-calibrated from this user's own data (overshootGuardFixedShadow=/
-    // overshootGuardComputedShadow=, see BoostOvershootGuardShadow.kt). Logs only, never applied.
-    ApsBoostPeakShadowCandidatesEnabled("boost_peak_shadow_candidates_enabled", false, defaultedBySM = true),
+    // Konzept 10 (2026-08-27/28) — Meal-Response Backoff Shadow (renamed from "Post-Meal Peak
+    // Shadow" — the original name didn't fit: recoveringShadow= only affects the post-peak
+    // rebound, the overshootGuard pair acts throughout COMMITTED and could affect peak height
+    // too). SHADOW ONLY, logs only, never applied. Split into two independent toggles (was one
+    // combined switch) so either candidate can be evaluated without the other running too.
+    // 1. The looser COMMITTED->RECOVERING backoff (recoveringShadow=).
+    ApsBoostRecoveringBackoffShadowEnabled("boost_recovering_backoff_shadow_enabled", false, defaultedBySM = true),
+    // 2. The two continuous overshoot-dampening variants together (overshootGuardFixedShadow=/
+    //    overshootGuardComputedShadow=, see BoostOvershootGuardShadow.kt) — kept as ONE toggle,
+    //    not split further: they're a deliberate side-by-side comparison pair (fixed vs.
+    //    self-calibrated coefficients), splitting them would defeat that comparison.
+    ApsBoostOvershootGuardShadowEnabled("boost_overshoot_guard_shadow_enabled", false, defaultedBySM = true),
     ApsBoostBypassVersionCheck("boost_bypass_version_check", true, defaultedBySM = true),
     // Boost V5 active-dosing alpha (2026-06-11) — when ON, V5's observe-confirm-commit SMB REPLACES
     // V1's SMB on cycles V1 permits one. V1 still owns basal + all safety gates. Toggle OFF = instant revert.
