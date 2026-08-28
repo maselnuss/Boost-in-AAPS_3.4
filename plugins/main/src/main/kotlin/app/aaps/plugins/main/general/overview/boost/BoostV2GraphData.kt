@@ -289,12 +289,21 @@ class BoostV2GraphData @Inject constructor(
             val v = values.next() ?: break
             points.add(DataPoint(v.getX(), v.getY()))
         }
-        if (points.isEmpty()) return
-        val maxHR = points.maxOf { it.getY() }
+        // 2026-08-28 bug found via screenshot (emulator has no HR source at all, so this path is
+        // always hit there): the old code set minY/maxY only AFTER an empty-check early return —
+        // with no data at all, the class-level minY/maxY sentinels (Double.MAX_VALUE/MIN_VALUE,
+        // never overwritten) flowed straight into graph.viewport.setMinY/setMaxY in performUpdate(),
+        // corrupting the axis into "NaN" tick labels (confirmed on-device — GridLabelRenderer can't
+        // compute a step size for an inverted MAX_VALUE..MIN_VALUE range). Fixed: always set a real
+        // fallback range (30-100, a plausible resting-to-elevated HR span) BEFORE the empty check,
+        // so a data-less window still gets a sane, if empty, axis — only the line-drawing below is
+        // actually skipped when there's nothing to draw.
+        val maxHR = points.maxOfOrNull { it.getY() } ?: 100.0
         if (useForScale) {
             minY = 30.0
             maxY = maxHR
         }
+        if (points.isEmpty()) return
         val color = rh.gac(context, app.aaps.core.ui.R.attr.heartRateColor)
         var segment = mutableListOf(points[0])
         for (i in 1 until points.size) {
@@ -617,6 +626,15 @@ class BoostV2GraphData @Inject constructor(
                 graph.series.add(s)
             }
         }
+        // 2026-08-28: second, more general NaN guard, found while re-checking the HR fallback fix
+        // above for OTHER rows it doesn't cover. Steps deliberately no longer participates in the
+        // useXForScale reference chain (own secondScale axis now) — a row with ONLY Steps enabled
+        // (no HR/IOB/COB/...) means nothing at all ever overwrites the minY/maxY sentinels, which
+        // would corrupt the axis into NaN exactly like the HR-empty case did, just for a different
+        // trigger (row composition, not empty data). Same fix shape: fall back to a sane range
+        // whenever nothing has claimed the scale, right before it's actually used.
+        if (maxY == Double.MIN_VALUE) maxY = 1.0
+        if (minY == Double.MAX_VALUE) minY = 0.0
         var step = 1.0
         if (maxY < 1) step = 0.1
         graph.viewport.setMaxY(Round.ceilTo(maxY, step))
