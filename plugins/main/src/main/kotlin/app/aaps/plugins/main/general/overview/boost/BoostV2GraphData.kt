@@ -140,6 +140,14 @@ class BoostV2GraphData @Inject constructor(
      *  "this row never asked for Steps, leave secondScale untouched" (see [performUpdate]). */
     private var secondScaleRequested = false
 
+    /** 2026-08-29 TEMPORARY diagnostic (user-reported: Steps bars don't render even with confirmed
+     *  fresh non-zero data, in neither the secondScale nor the primary-axis configuration) — set at
+     *  the end of [addStepsBars], read by the Fragment and appended to the row's own label text so
+     *  it's visible in a plain screenshot without needing logcat/adb access to the real device.
+     *  Remove once the root cause is confirmed and fixed. */
+    var stepsDebugInfo: String = ""
+        private set
+
     private lateinit var graph: GraphView
     private lateinit var overviewData: OverviewData
 
@@ -376,8 +384,17 @@ class BoostV2GraphData @Inject constructor(
             val stepsFormat = NumberFormat.getIntegerInstance(Locale.US).also { it.isGroupingUsed = false }
             graph.secondScale.labelFormatter = DefaultLabelFormatter(stepsFormat, stepsFormat)
         }
-        val values = (overviewData.stepsCountGraphSeries as PointsWithLabelGraphSeries<DataPointWithLabelInterface>)
-            .getValues(Double.NEGATIVE_INFINITY, Double.POSITIVE_INFINITY)
+        val stepsSeries = overviewData.stepsCountGraphSeries as PointsWithLabelGraphSeries<DataPointWithLabelInterface>
+        // 2026-08-29 TEMPORARY diagnostic (user pushback: the OLD stock addSteps(), which just adds
+        // this exact series object as-is via .highestValueY, reliably showed data — my rebuilt
+        // BarGraphSeries never does). Read via the SAME proven method the stock code used, BEFORE my
+        // own extraction loop below, so the debug string can show whether the two ever disagree —
+        // if origHighest is non-zero while my own raw-loop below finds nothing, the bug is in MY
+        // extraction, not in BarGraphSeries/drawing.
+        val origHighestY = stepsSeries.highestValueY
+        val origLowX = stepsSeries.lowestValueX
+        val origHighX = stepsSeries.highestValueX
+        val values = stepsSeries.getValues(Double.NEGATIVE_INFINITY, Double.POSITIVE_INFINITY)
         val raw = mutableListOf<Pair<Double, Double>>() // x, real steps
         while (values.hasNext()) {
             val v = values.next() ?: break
@@ -392,6 +409,17 @@ class BoostV2GraphData @Inject constructor(
         } else {
             secondScaleMaxY = max(secondScaleMaxY, maxSteps * 1.15)
         }
+        // 2026-08-29 TEMPORARY diagnostic — see [stepsDebugInfo] KDoc. "orig" = read via the stock
+        // addSteps()'s own proven methods, from BEFORE the extraction loop above, for comparison.
+        val timeFmt = java.text.SimpleDateFormat("HH:mm", Locale.US)
+        val origInfo = "orig(maxY=${origHighestY.toInt()},x=${timeFmt.format(java.util.Date(origLowX.toLong()))}-${timeFmt.format(java.util.Date(origHighX.toLong()))})"
+        stepsDebugInfo = if (raw.isEmpty()) {
+            "n=0 scale=${if (useForScale) "P" else "S"} $origInfo"
+        } else {
+            val lastX = raw.maxOf { it.first }
+            val lastY = raw.first { it.first == lastX }.second
+            "n=${raw.size} last=${timeFmt.format(java.util.Date(lastX.toLong()))}@${lastY.toInt()} scale=${if (useForScale) "P" else "S"} $origInfo"
+        }
         if (raw.isEmpty()) return
         // 3% of the day's own peak, floored at 1.0 so a near-flat/sedentary day (tiny maxSteps)
         // still gets a visible-but-clearly-minimal stub rather than an invisible sliver.
@@ -404,6 +432,9 @@ class BoostV2GraphData @Inject constructor(
         val barSeries = BarGraphSeries(points.toTypedArray()).also {
             it.setValueDependentColor { p -> if (p.realSteps <= 0.0) zeroColor else activeColor }
         }
+        // 2026-08-29 TEMPORARY diagnostic — see [stepsDebugInfo] KDoc. isEmpty catches a mismatch
+        // between what raw/points contained and what the constructed BarGraphSeries itself reports.
+        stepsDebugInfo += " empty=${barSeries.isEmpty}"
         if (useForScale) addSeries(barSeries) else secondScaleSeries.add(barSeries)
     }
 
