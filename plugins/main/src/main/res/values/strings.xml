@@ -336,5 +336,6 @@
     <string name="boost_widget_configuration">Boost Widget Configuration</string>
     <string name="boost_widget_configure_opacity">Configure opacity</string>
     <string name="boost_widget_use_black">Use black color</string>
+    <string name="boost_widget_configure_corner_radius">Configure corner radius</string>
 
 </resources>

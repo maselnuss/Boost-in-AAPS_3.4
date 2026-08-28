@@ -38,6 +38,16 @@ class BoostWidgetConfigureActivity : DaggerActivity() {
             }
         })
 
+        // 2026-08-28 (user request): same pattern as the opacity SeekBar above.
+        binding.cornerRadiusSeekBar.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+            override fun onStopTrackingTouch(seekBar: SeekBar) {}
+            override fun onStartTrackingTouch(seekBar: SeekBar) {}
+            override fun onProgressChanged(seekBar: SeekBar, progress: Int, fromUser: Boolean) {
+                preferences.put(IntComposedKey.WidgetCornerRadius, appWidgetId, value = progress)
+                BoostWidget.updateWidget(this@BoostWidgetConfigureActivity, "BoostWidgetConfigure")
+            }
+        })
+
         binding.closeLayout.close.setOnClickListener {
             val resultValue = Intent()
             resultValue.putExtra(AppWidgetManager.EXTRA_APPWIDGET_ID, appWidgetId)
@@ -58,12 +68,14 @@ class BoostWidgetConfigureActivity : DaggerActivity() {
         }
 
         binding.seekBar.progress = preferences.get(IntComposedKey.WidgetOpacity, appWidgetId)
+        binding.cornerRadiusSeekBar.progress = preferences.get(IntComposedKey.WidgetCornerRadius, appWidgetId)
         binding.useBlack.isChecked = preferences.get(BooleanComposedKey.WidgetUseBlack, appWidgetId)
     }
 
     override fun onDestroy() {
         super.onDestroy()
         binding.seekBar.setOnSeekBarChangeListener(null)
+        binding.cornerRadiusSeekBar.setOnSeekBarChangeListener(null)
         binding.closeLayout.close.setOnClickListener(null)
         binding.useBlack.setOnCheckedChangeListener(null)
     }

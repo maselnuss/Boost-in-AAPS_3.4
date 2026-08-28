@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+Rounded background for the Boost widget (2026-08-28, user-reported: widget sometimes rendered with
+sharp corners instead of the rounded look every other home-screen widget has). Root cause: the
+widget layout used a flat android:background="@color/black" (a plain rectangle) instead of a
+rounded shape — unlike the stock AAPS widget, which has its own rounded widget_background.xml in
+the `ui` Gradle module. plugins/main (where Boost lives) only depends on `core:ui`, not `ui`, so
+that drawable isn't reachable here — this is a local equivalent, not a duplicate-for-no-reason.
+
+Fixed 16dp corner radius (not a themed ?attr/appWidgetRadius reference, unlike the stock version):
+the stock drawable's radius attribute is a CUSTOM attr declared only in the `ui` module's own
+theme, not the real Android 12 system widget-radius attr — referencing it from plugins/main
+wouldn't resolve. A fixed dp value works on every API level and needs no cross-module attr wiring;
+16dp matches the stock module's own themed value, so the two look the same in practice.
+-->
+<shape xmlns:android="http://schemas.android.com/apk/res/android"
+    android:shape="rectangle">
+
+    <corners android:radius="16dp" />
+    <solid android:color="@color/black" />
+</shape>

@@ -115,6 +115,25 @@ class BoostV2GraphData @Inject constructor(
         // Double, not Long: compared directly against DataPoint.getX() (graph X coordinates are
         // epoch-millis as Double) — Kotlin has no implicit Double/Long comparison.
         const val HR_GAP_THRESHOLD_MS = 15 * 60_000.0
+
+        /** 2026-08-28 (user request): V2 colours for the secondary-graph debug traces that were
+         *  previously left on their theme-attribute defaults (`addAbsIob`/`addCob`/`addMinusBGI`/
+         *  `addRatio`/`addVarSens`/`addDeviationSlope` — see the "Delegated methods" section KDoc).
+         *  These series objects are rebuilt fresh every refresh by the SHARED
+         *  `PrepareIobAutosensGraphDataWorker` (also feeds the stock Overview screen) — overriding
+         *  `.color` here follows the same already-established pattern `addIob` above uses for the
+         *  main IOB line, not a new risk. Colour choices extend the existing V2 hue family
+         *  (cyan/orange/green/blue) rather than reusing IOB_LINE/BASAL_FILL outright, so each trace
+         *  stays visually distinguishable when several are shown on the same row. Deviations
+         *  deliberately excluded — its colour is per-bar (green/red by sign), assigned where the
+         *  underlying `DeviationDataPoint`s are built, not overridable at the series level here. */
+        val COB_LINE = Color.parseColor("#fbbf24")   // amber — carbs, distinct from BASAL_FILL's orange
+        val COB_FILL = Color.argb(102, 251, 191, 36)  // amber, 40%
+        val BGI_LINE = Color.parseColor("#f87171")    // soft red — BG-impact
+        val ABS_IOB_LINE = Color.parseColor("#38bdf8") // light cyan-blue — distinct from IOB_LINE's darker blue
+        val RATIO_LINE = Color.parseColor("#a78bfa")  // violet — sensitivity ratio
+        val DEV_SLOPE_POS = Color.parseColor("#6ee7b7") // reuses TARGET_LINE's green — "accelerating up" reads as the same "good/reference" hue family
+        val DEV_SLOPE_NEG = Color.parseColor("#ff5252") // reuses IN_RANGE_LOWER_BORDER's red — "accelerating down"
     }
 
     // ── Internal state (mirrors GraphData) ───────────────────────────────
@@ -139,7 +158,8 @@ class BoostV2GraphData @Inject constructor(
         it.overviewData = overviewData
     }
 
-    // ── Delegated methods (unchanged logic) ──────────────────────────────
+    // ── Delegated methods (unchanged logic, colours now V2-overridden 2026-08-28 — see the
+    //    companion-object colour constants above; Deviations excluded, see its KDoc) ────────────
 
     fun addBucketedData() {
         addSeries(overviewData.bucketedGraphSeries as PointsWithLabelGraphSeries<DataPointWithLabelInterface>)
@@ -194,6 +214,10 @@ class BoostV2GraphData @Inject constructor(
             minY = -overviewData.maxBGIValue
         }
         overviewData.bgiScale.multiplier = maxY * scale / overviewData.maxBGIValue
+        // 2026-08-28: V2 colour override (user request) — see the BGI_LINE KDoc in the companion
+        // object for why this is safe to mutate directly (same pattern as addIob's IOB_LINE above).
+        (overviewData.minusBgiSeries as FixedLineGraphSeries<ScaledDataPoint>).color = BGI_LINE
+        (overviewData.minusBgiHistSeries as FixedLineGraphSeries<ScaledDataPoint>).color = BGI_LINE
         addSeries(overviewData.minusBgiSeries as FixedLineGraphSeries<ScaledDataPoint>)
         addSeries(overviewData.minusBgiHistSeries as FixedLineGraphSeries<ScaledDataPoint>)
     }
@@ -204,6 +228,7 @@ class BoostV2GraphData @Inject constructor(
             minY = -overviewData.maxIobValueFound
         }
         overviewData.iobScale.multiplier = maxY * scale / overviewData.maxIobValueFound
+        (overviewData.absIobSeries as FixedLineGraphSeries<ScaledDataPoint>).color = ABS_IOB_LINE
         addSeries(overviewData.absIobSeries as FixedLineGraphSeries<ScaledDataPoint>)
     }
 
@@ -213,6 +238,10 @@ class BoostV2GraphData @Inject constructor(
             minY = -overviewData.maxCobValueFound
         }
         overviewData.cobScale.multiplier = maxY * scale / overviewData.maxCobValueFound
+        (overviewData.cobSeries as FixedLineGraphSeries<ScaledDataPoint>).also {
+            it.color = COB_LINE
+            it.backgroundColor = COB_FILL
+        }
         addSeries(overviewData.cobSeries as FixedLineGraphSeries<ScaledDataPoint>)
         addSeries(overviewData.cobMinFailOverSeries as PointsWithLabelGraphSeries<DataPointWithLabelInterface>)
     }
@@ -223,6 +252,9 @@ class BoostV2GraphData @Inject constructor(
             minY = -maxY
         }
         overviewData.devScale.multiplier = maxY * scale / overviewData.maxDevValueFound
+        // No V2 colour override here — deliberately. Deviations colours per-bar (green/red by sign)
+        // via DeviationDataPoint.color, assigned where the points are built (PrepareIobAutosens-
+        // GraphDataWorker), not something a single series-level `.color` override could replace.
         addSeries(overviewData.deviationsSeries as BarGraphSeries<DeviationDataPoint>)
     }
 
@@ -236,6 +268,7 @@ class BoostV2GraphData @Inject constructor(
             overviewData.ratioScale.multiplier = maxY * scale / max(overviewData.maxRatioValueFound, abs(overviewData.minRatioValueFound))
             overviewData.ratioScale.shift = 0.0
         }
+        (overviewData.ratioSeries as LineGraphSeries<ScaledDataPoint>).color = RATIO_LINE
         addSeries(overviewData.ratioSeries as LineGraphSeries<ScaledDataPoint>)
     }
 
@@ -255,6 +288,8 @@ class BoostV2GraphData @Inject constructor(
         }
         overviewData.dsMaxScale.multiplier = graphMaxY * scale / overviewData.maxFromMaxValueFound
         overviewData.dsMinScale.multiplier = graphMaxY * scale / overviewData.maxFromMinValueFound
+        (overviewData.dsMaxSeries as LineGraphSeries<ScaledDataPoint>).color = DEV_SLOPE_POS
+        (overviewData.dsMinSeries as LineGraphSeries<ScaledDataPoint>).color = DEV_SLOPE_NEG
         addSeries(overviewData.dsMaxSeries as LineGraphSeries<ScaledDataPoint>)
         addSeries(overviewData.dsMinSeries as LineGraphSeries<ScaledDataPoint>)
     }
@@ -265,6 +300,9 @@ class BoostV2GraphData @Inject constructor(
             minY = overviewData.minVarSensValueFound
         }
         overviewData.varSensScale.multiplier = maxY * scale / overviewData.maxVarSensValueFound
+        // Reuses RATIO_LINE — VarSens already shared ratioColor pre-V2 (PrepareIobAutosens-
+        // GraphDataWorker), same conceptual "sensitivity" family, kept paired here too.
+        (overviewData.varSensSeries as LineGraphSeries<ScaledDataPoint>).color = RATIO_LINE
         addSeries(overviewData.varSensSeries as LineGraphSeries<ScaledDataPoint>)
     }
 
