@@ -26,9 +26,12 @@ import app.aaps.core.interfaces.utils.Round
 import app.aaps.core.keys.UnitDoubleKey
 import app.aaps.core.keys.interfaces.Preferences
 import app.aaps.core.ui.toast.ToastUtils
+import com.jjoe64.graphview.DefaultLabelFormatter
 import com.jjoe64.graphview.GraphView
 import com.jjoe64.graphview.series.DataPoint
 import com.jjoe64.graphview.series.Series
+import java.text.NumberFormat
+import java.util.Locale
 import javax.inject.Inject
 import kotlin.math.abs
 import kotlin.math.max
@@ -389,6 +392,17 @@ class BoostV2GraphData @Inject constructor(
         // has none right now" (still show an empty axis, matching HR's fallback) from "this row never
         // had addStepsBars called at all" (never touch secondScale — see the NaN-pollution fix above).
         secondScaleRequested = true
+        // 2026-08-28 (user-reported via screenshot): right-axis labels were getting cut off at the
+        // screen edge. Root cause traced in GridLabelRenderer.java: calcLabelVerticalSecondScaleSize()
+        // — unlike the LEFT axis' equivalent, it reserves NO extra `labelsSpace` safety margin, and
+        // only measures ONE sample label (not the actual widest one shown). Combined with
+        // DefaultLabelFormatter's default behaviour (up to several fraction digits depending on the
+        // axis span), long decimal labels had little margin to spare. Steps counts are integers
+        // anyway, so forcing 0 fraction digits here removes the main source of long labels — safe
+        // to call every refresh (idempotent), and only reachable from here since this is the one
+        // place secondScaleRequested is already true (see the NaN-pollution fix's KDoc above).
+        val stepsFormat = NumberFormat.getIntegerInstance(Locale.US).also { it.isGroupingUsed = false }
+        graph.secondScale.labelFormatter = DefaultLabelFormatter(stepsFormat, stepsFormat)
         val values = (overviewData.stepsCountGraphSeries as PointsWithLabelGraphSeries<DataPointWithLabelInterface>)
             .getValues(Double.NEGATIVE_INFINITY, Double.POSITIVE_INFINITY)
         val raw = mutableListOf<Pair<Double, Double>>() // x, real steps
@@ -663,6 +677,15 @@ class BoostV2GraphData @Inject constructor(
         graph.gridLabelRenderer.gridColor = GRID_COLOR
         graph.gridLabelRenderer.horizontalLabelsColor = LABEL_COLOR
         graph.gridLabelRenderer.verticalLabelsColor = LABEL_COLOR
+        // 2026-08-28 (user-reported via screenshot): the right-hand (secondScale) axis labels
+        // rendered in the library's own default colour, not the V2 grey — verified in
+        // GridLabelRenderer.java, `verticalLabelsSecondScaleColor` defaults to the same raw
+        // theme-attribute colour as the LEFT axis' own pre-V2 default, but only the left one
+        // (`verticalLabelsColor`) was ever overridden here. Safe to set unconditionally on every
+        // row (unlike anything touching `graph.secondScale` itself) — `gridLabelRenderer` is not
+        // the lazy-instantiated object, only `graph.secondScale` is (see the NaN-pollution fix
+        // further down); setting an unused style property here has no effect on rows without Steps.
+        graph.gridLabelRenderer.verticalLabelsSecondScaleColor = LABEL_COLOR
     }
 
     // ── Internal plumbing ────────────────────────────────────────────────
