@@ -58,6 +58,13 @@ class AnticipationShadow(
         bg: Double,
         delta: Double,
         inPostRescueWindow: Boolean,
+        // 2026-08-29: mirrored into consoleError too (user request) — anticip= was reason-only
+        // until now, so it never appeared in the in-app Script Debug view, only NS. Deliberately
+        // LAST (not next to reason) — AnticipationShadowTest.kt calls this with reason/nowMs
+        // positional; inserting a parameter earlier would have silently shifted nowMs into this
+        // slot and broken every existing positional test call (caught on review, not by the
+        // compiler here since I was reading, not building).
+        consoleError: MutableList<String>? = null,
     ) {
         try {
             val st = store ?: AnticipationOnsetStore.deserialize(runCatching { loadState() }.getOrNull())
@@ -102,14 +109,15 @@ class AnticipationShadow(
 
             // 5. Emit. Fields: pEx,pMeal,srcEx,srcMeal | exArm,exConf,exBO | mealArm,mealConf,mealBO |
             //    minsSinceEx,minsSinceMeal,nEx,nMeal
-            reason.append(
+            val anticipNote =
                 "anticip=${f(pEx)},${f(pMeal)},${exFit?.source ?: "-"},${mealFit?.source ?: "-"}," +
                     "${exOut.armed},${exOut.confirmed},${exOut.backedOut}," +
                     "${mealOut.armed},${mealOut.confirmed},${mealOut.backedOut}," +
                     "${st.minsSinceLast(AnticipationOnsetStore.Kind.EXERCISE, nowMs).toInt()}," +
                     "${st.minsSinceLast(AnticipationOnsetStore.Kind.MEAL, nowMs).toInt()}," +
                     "${st.count(AnticipationOnsetStore.Kind.EXERCISE)},${st.count(AnticipationOnsetStore.Kind.MEAL)}; "
-            )
+            reason.append(anticipNote)
+            consoleError?.add(anticipNote.trimEnd(' ', ';'))
         } catch (t: Throwable) {
             logError("Anticipation shadow failed (swallowed — dosing untouched)", t)
         }

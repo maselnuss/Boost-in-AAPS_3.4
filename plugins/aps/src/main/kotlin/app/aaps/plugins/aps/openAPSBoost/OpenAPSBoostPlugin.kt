@@ -2057,8 +2057,12 @@ open class OpenAPSBoostPlugin @Inject constructor(
                     // pure telemetry; the withdrawal ACTION is the policy leg (shadow-first, auto-config-
                     // managed when built). lo60 is NOT actionable (band too wide — cries wolf, FA 0.56).
                     val floorBreach = if (fc.lo30 < 70.0) 1 else 0
-                    it.reason.append("twin=${fc.fc30},${fc.fc60},${fc.lo60},${fc.hi60},${fc.raMean},${fc.filteredGi}," +
-                        "${Round.roundTo(bolusU + basalU, 0.001)},${fc.lo30},$floorBreach; ")
+                    // 2026-08-29: mirrored into consoleError too (user request) — was reason-only
+                    // until now, so this never appeared in the in-app Script Debug view, only NS.
+                    val twinNote = "twin=${fc.fc30},${fc.fc60},${fc.lo60},${fc.hi60},${fc.raMean},${fc.filteredGi}," +
+                        "${Round.roundTo(bolusU + basalU, 0.001)},${fc.lo30},$floorBreach; "
+                    it.reason.append(twinNote)
+                    it.consoleError?.add(twinNote.trimEnd(' ', ';'))
                     // Anticipatory back-out shadow: run the retractable-anticipation state machine off the
                     // Twin's Ra + BG. ARM on the accelMeal onset detector (the best onset cue from signal
                     // digging) with mlMealLikely retained as a secondary OR-trigger; armSrc is logged so the
@@ -2075,7 +2079,13 @@ open class OpenAPSBoostPlugin @Inject constructor(
                     }.getOrDefault(false)
                     runCatching {
                         backoutShadow.runCycle(now, glucoseStatus.glucose, fc.raMean, fc.lo30, it.mlMealLikely, accelArm)
-                            ?.let { p -> it.reason.append("antBackout=$p; ") }
+                            ?.let { p ->
+                                // 2026-08-29: mirrored into consoleError too (user request) — same
+                                // reason-only gap as twin= above.
+                                val antBackoutNote = "antBackout=$p; "
+                                it.reason.append(antBackoutNote)
+                                it.consoleError?.add(antBackoutNote.trimEnd(' ', ';'))
+                            }
                     }.onFailure { t -> aapsLogger.error(LTag.APS, "Back-out shadow failed (swallowed — dosing untouched)", t) }
                 }
             }.onFailure { t -> aapsLogger.error(LTag.APS, "KAIROS Twin shadow failed (swallowed — dosing untouched)", t) }
@@ -2391,6 +2401,7 @@ open class OpenAPSBoostPlugin @Inject constructor(
             runCatching {
                 anticipShadow.runCycle(
                     reason = it.reason,
+                    consoleError = it.consoleError,
                     nowMs = now,
                     steps5Min = recentSteps5Min,
                     mealStateName = v5decision?.mealHypothesis?.name,
