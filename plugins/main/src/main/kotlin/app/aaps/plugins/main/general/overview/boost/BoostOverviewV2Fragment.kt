@@ -1045,14 +1045,7 @@ class BoostOverviewV2Fragment : DaggerFragment(), View.OnClickListener {
             }
             for (g in 0 until min(secondaryGraphs.size, menuChartSettings.size - 1)) {
                 val row = menuChartSettings[g + 1]
-                // 2026-08-29 TEMPORARY diagnostic (user report: Steps bars never render, neither
-                // combined nor isolated, even with confirmed fresh non-zero data) — see
-                // BoostV2GraphData.stepsDebugInfo KDoc. Remove once root cause is confirmed/fixed.
-                val stepsDebugSuffix = if (row[OverviewMenus.CharType.STEPS.ordinal]) " [${secondaryGraphsData[g].stepsDebugInfo}]" else ""
-                // 2026-08-29 TEMPORARY diagnostic (user report: unexplained smooth line cutting
-                // across the HR trace) — see BoostV2GraphData.hrDebugInfo KDoc.
-                val hrDebugSuffix = if (row[OverviewMenus.CharType.HR.ordinal]) " {${secondaryGraphsData[g].hrDebugInfo}}" else ""
-                secondaryGraphsLabel[g].text = overviewMenus.enabledTypes(g + 1) + stepsDebugSuffix + hrDebugSuffix
+                secondaryGraphsLabel[g].text = overviewMenus.enabledTypes(g + 1)
                 secondaryGraphs[g].visibility = (
                     row[OverviewMenus.CharType.ABS.ordinal] || row[OverviewMenus.CharType.IOB.ordinal] ||
                         row[OverviewMenus.CharType.COB.ordinal] || row[OverviewMenus.CharType.DEV.ordinal] ||
