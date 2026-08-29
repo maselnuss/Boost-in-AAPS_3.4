@@ -3,9 +3,13 @@ package app.aaps.plugins.main.general.overview.boost
 import android.annotation.SuppressLint
 import android.content.res.ColorStateList
 import android.graphics.Color
+import android.graphics.Typeface
 import android.os.Bundle
 import android.os.Handler
 import android.os.HandlerThread
+import android.text.SpannableStringBuilder
+import android.text.Spanned
+import android.text.style.StyleSpan
 import android.util.TypedValue
 import android.view.LayoutInflater
 import android.view.View
@@ -706,25 +710,112 @@ class BoostOverviewV2Fragment : DaggerFragment(), View.OnClickListener {
             "Boost V6 ${bs.v5State.verb}, score ${String.format(Locale.getDefault(), "%.2f", bs.v5Score)}, dose ${String.format(Locale.getDefault(), "%.2f", bs.v5FinalDose)} units"
     }
 
+    // ── Structured debug dialogs (2026-08-29, user request: the raw scriptDebug dump was "kaum
+    //    lesbar" — flat text, shadow/experimental tags scattered throughout instead of grouped). ──
+
+    companion object {
+
+        /** Every known shadow-telemetry tag prefix (verified against source, not guessed — see
+         *  TODO.md's "Script-Debug ... Experimental" entry for the audit). Lines starting with one
+         *  of these are pulled out of their normal section and collected under the dedicated
+         *  Experimental heading at the end instead. `boostV7_*` deliberately excluded — RT fields,
+         *  never reach `consoleError`/scriptDebugText at all (see TODO.md: dev's own backtest
+         *  already concluded NO-GO for that formulation, not worth surfacing here). */
+        private val SHADOW_TAG_PREFIXES = listOf(
+            "floorSlewShadow:", "gpsActivity:", "postExerciseWindowShadow:",
+            "postExerciseHyperBrakeShadow:", "v6PreMealShadow:", "recoveringShadow=",
+            "overshootGuardFixedShadow=", "overshootGuardComputedShadow=", "alcoholShadow:",
+            "aggConfirmShadow=", "accelMeal=", "boostV5Budget=", "twin=", "antBackout=", "anticip=",
+        )
+
+        /** Matches the engine's own section dividers, e.g. "── Glucose ─────" (built with U+2500
+         *  BOX DRAWINGS LIGHT HORIZONTAL, not a plain hyphen — verified in DetermineBasalBoost.kt).
+         *  Capture group 1 = the section name. */
+        private val SECTION_HEADER_REGEX = Regex("^─{2,}\\s*(.+?)\\s*─{2,}$")
+
+        /** Matches pure decorative divider lines (the engine's "════..." title-box borders) with no
+         *  name attached — dropped entirely, the bold section headers below replace that visual job. */
+        private val SEPARATOR_ONLY_REGEX = Regex("^[═─\\s]+$")
+    }
+
+    private fun appendBold(sb: SpannableStringBuilder, text: String) {
+        val start = sb.length
+        sb.append(text)
+        sb.setSpan(StyleSpan(Typeface.BOLD), start, sb.length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+    }
+
+    /** Blank line + bold "▎ Name" + newline — visually distinct from a label:value line. */
+    private fun appendSectionHeader(sb: SpannableStringBuilder, name: String) {
+        if (sb.isNotEmpty()) sb.append("\n\n")
+        appendBold(sb, "▎ $name")
+        sb.append("\n")
+    }
+
+    private fun appendLabelValue(sb: SpannableStringBuilder, label: String, value: String) {
+        appendBold(sb, "$label: ")
+        sb.append(value).append("\n")
+    }
+
+    /**
+     * Re-parses the engine's raw scriptDebug dump (see [SHADOW_TAG_PREFIXES]/[SECTION_HEADER_REGEX]
+     * KDoc for the exact line formats this expects, verified against DetermineBasalBoost.kt) into
+     * bold section headers + grouped lines, with every shadow-tag line pulled out into its own
+     * "⚗ Experimental / Shadow" section at the very end (2026-08-29 user decision: bottom, not top).
+     */
+    private fun appendFormattedScriptDebug(sb: SpannableStringBuilder, rawText: String) {
+        if (rawText.isBlank()) {
+            appendSectionHeader(sb, "Script Debug")
+            sb.append("(no debug output)")
+            return
+        }
+        val shadowLines = mutableListOf<String>()
+        var sectionOpened = false
+        for (rawLine in rawText.split("\n")) {
+            val line = rawLine.trim()
+            if (line.isEmpty() || SEPARATOR_ONLY_REGEX.matches(line)) continue
+            if (SHADOW_TAG_PREFIXES.any { line.startsWith(it) }) {
+                shadowLines.add(line)
+                continue
+            }
+            val sectionMatch = SECTION_HEADER_REGEX.find(line)
+            if (sectionMatch != null) {
+                appendSectionHeader(sb, sectionMatch.groupValues[1])
+                sectionOpened = true
+                continue
+            }
+            if (!sectionOpened) {
+                appendSectionHeader(sb, "Overview")
+                sectionOpened = true
+            }
+            sb.append(line).append("\n")
+        }
+        if (shadowLines.isNotEmpty()) {
+            appendSectionHeader(sb, "⚗ Experimental / Shadow")
+            shadowLines.forEach { sb.append(it).append("\n") }
+        }
+    }
+
     @SuppressLint("SetTextI18n")
     private fun showV5Detail() {
         val a = activity ?: return
         val bs = lastBoostStatus
-        val sb = StringBuilder()
-        sb.append("State: ${bs.v5State.label} (${bs.v5State.verb}) · age ${bs.v5Age} cycle${if (bs.v5Age == 1) "" else "s"}")
-        sb.append("\n\nMeal score: ${String.format(Locale.getDefault(), "%.2f", bs.v5Score)}   (enter 0.44 · confirm 0.55)")
-        sb.append("\nAction multiplier: ×${String.format(Locale.getDefault(), "%.2f", bs.v5ActionMult)}")
-        sb.append("\nAggression budget: ${String.format(Locale.getDefault(), "%.2f", bs.v5Budget)}U")
-        sb.append("\nDose this cycle: ${String.format(Locale.getDefault(), "%.2f", bs.v5FinalDose)}U")
-        sb.append("\n\nBrakes:")
-        if (bs.v5Brakes.isEmpty()) sb.append("\n  none")
+        val sb = SpannableStringBuilder()
+        appendSectionHeader(sb, "Decision")
+        appendLabelValue(sb, "State", "${bs.v5State.label} (${bs.v5State.verb}) · age ${bs.v5Age} cycle${if (bs.v5Age == 1) "" else "s"}")
+        appendLabelValue(sb, "Meal score", "${String.format(Locale.getDefault(), "%.2f", bs.v5Score)}   (enter 0.44 · confirm 0.55)")
+        appendLabelValue(sb, "Action multiplier", "×${String.format(Locale.getDefault(), "%.2f", bs.v5ActionMult)}")
+        appendLabelValue(sb, "Aggression budget", "${String.format(Locale.getDefault(), "%.2f", bs.v5Budget)}U")
+        appendLabelValue(sb, "Dose this cycle", "${String.format(Locale.getDefault(), "%.2f", bs.v5FinalDose)}U")
+        appendLabelValue(sb, "Delta accel", "${String.format(Locale.getDefault(), "%.1f", bs.deltaAccl)}%")
+        appendBold(sb, "Brakes:")
+        sb.append("\n")
+        if (bs.v5Brakes.isEmpty()) sb.append("  none\n")
         else bs.v5Brakes.forEach { b ->
-            if (b.isHard) sb.append("\n  ⛔ ${b.label} (hard disable)")
-            else sb.append("\n  ${b.label}: ×${String.format(Locale.getDefault(), "%.2f", b.factor)}")
+            if (b.isHard) sb.append("  ⛔ ${b.label} (hard disable)\n")
+            else sb.append("  ${b.label}: ×${String.format(Locale.getDefault(), "%.2f", b.factor)}\n")
         }
-        sb.append("\n\nDelta accel: ${String.format(Locale.getDefault(), "%.1f", bs.deltaAccl)}%")
-        sb.append("\n\n--- Script Debug ---\n${bs.scriptDebugText.ifEmpty { "(no debug output)" }}")
-        OKDialog.show(a, "Boost V6 decision", sb.toString())
+        appendFormattedScriptDebug(sb, bs.scriptDebugText)
+        OKDialog.show(a, "Boost V6 decision", sb as Spanned)
     }
 
     // --- Profile ---
@@ -958,7 +1049,10 @@ class BoostOverviewV2Fragment : DaggerFragment(), View.OnClickListener {
                 // combined nor isolated, even with confirmed fresh non-zero data) — see
                 // BoostV2GraphData.stepsDebugInfo KDoc. Remove once root cause is confirmed/fixed.
                 val stepsDebugSuffix = if (row[OverviewMenus.CharType.STEPS.ordinal]) " [${secondaryGraphsData[g].stepsDebugInfo}]" else ""
-                secondaryGraphsLabel[g].text = overviewMenus.enabledTypes(g + 1) + stepsDebugSuffix
+                // 2026-08-29 TEMPORARY diagnostic (user report: unexplained smooth line cutting
+                // across the HR trace) — see BoostV2GraphData.hrDebugInfo KDoc.
+                val hrDebugSuffix = if (row[OverviewMenus.CharType.HR.ordinal]) " {${secondaryGraphsData[g].hrDebugInfo}}" else ""
+                secondaryGraphsLabel[g].text = overviewMenus.enabledTypes(g + 1) + stepsDebugSuffix + hrDebugSuffix
                 secondaryGraphs[g].visibility = (
                     row[OverviewMenus.CharType.ABS.ordinal] || row[OverviewMenus.CharType.IOB.ordinal] ||
                         row[OverviewMenus.CharType.COB.ordinal] || row[OverviewMenus.CharType.DEV.ordinal] ||
@@ -1237,12 +1331,14 @@ class BoostOverviewV2Fragment : DaggerFragment(), View.OnClickListener {
                 }
                 R.id.v2_pill_tdd -> {
                     val bs = lastBoostStatus
-                    OKDialog.show(a, "Total Daily Dose",
-                        "oapsProfile.TDD: ${if (bs.tddWeighted > 0) String.format(Locale.getDefault(), "%.1f", bs.tddWeighted) else "(not set)"}\n" +
-                            "TDD from debug: ${if (bs.tddFromDebug > 0) String.format(Locale.getDefault(), "%.1f", bs.tddFromDebug) else "(not found)"}\n" +
-                            "TDD 7d avg: ${String.format(Locale.getDefault(), "%.1f", bs.tdd7d)}\n" +
-                            "TDD 24h: ${String.format(Locale.getDefault(), "%.1f", bs.tdd24h)}\n\n" +
-                            "--- Script Debug ---\n${bs.scriptDebugText.ifEmpty { "(no debug output)" }}")
+                    val sb = SpannableStringBuilder()
+                    appendSectionHeader(sb, "Total Daily Dose")
+                    appendLabelValue(sb, "oapsProfile.TDD", if (bs.tddWeighted > 0) String.format(Locale.getDefault(), "%.1f", bs.tddWeighted) else "(not set)")
+                    appendLabelValue(sb, "TDD from debug", if (bs.tddFromDebug > 0) String.format(Locale.getDefault(), "%.1f", bs.tddFromDebug) else "(not found)")
+                    appendLabelValue(sb, "TDD 7d avg", String.format(Locale.getDefault(), "%.1f", bs.tdd7d))
+                    appendLabelValue(sb, "TDD 24h", String.format(Locale.getDefault(), "%.1f", bs.tdd24h))
+                    appendFormattedScriptDebug(sb, bs.scriptDebugText)
+                    OKDialog.show(a, "Total Daily Dose", sb as Spanned)
                 }
                 R.id.v2_pill_profile -> {
                     // Profile pill opens the standard profile-switch dialog. Meal-management
@@ -1267,11 +1363,13 @@ class BoostOverviewV2Fragment : DaggerFragment(), View.OnClickListener {
                     val exerciseTargetStr = if (bs.targetBgMgdl > 0)
                         "${profileUtil.fromMgdlToStringInUnits(bs.targetBgMgdl)} $unitsLabel"
                     else "---"
-                    OKDialog.show(a, "Exercise / Activity Mode",
-                        "Current: ${bs.activityDetail}\n\n" +
-                            "Exercise target: $exerciseTargetStr\n\n" +
-                            "Profile: ${bs.profilePercentage}%\n\n" +
-                            "--- Script Debug ---\n${bs.scriptDebugText.ifEmpty { "(no debug output)" }}")
+                    val sb = SpannableStringBuilder()
+                    appendSectionHeader(sb, "Activity")
+                    appendLabelValue(sb, "Current", bs.activityDetail)
+                    appendLabelValue(sb, "Exercise target", exerciseTargetStr)
+                    appendLabelValue(sb, "Profile", "${bs.profilePercentage}%")
+                    appendFormattedScriptDebug(sb, bs.scriptDebugText)
+                    OKDialog.show(a, "Exercise / Activity Mode", sb as Spanned)
                 }
 
                 // Bottom action buttons

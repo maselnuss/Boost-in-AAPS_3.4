@@ -110,14 +110,31 @@ class BoostV2GraphData @Inject constructor(
          *  constant (not the one-time onViewCreated setup) is the effective colour. */
         val LABEL_COLOR = Color.parseColor("#aaaaaa")
 
-        /** 2026-08-28: gap threshold for [addHeartRateLine] — a break in HR readings (watch off
-         *  wrist, Bluetooth drop) longer than this starts a new line segment instead of drawing a
-         *  straight line across the gap. Normal Wear sampling is 1-5 min, so 15 min is comfortably
-         *  above sampling jitter while still catching real gaps of an hour+ well before they'd
-         *  otherwise get silently bridged. */
+        /** 2026-08-29 (lowered from 15 min — user found a visible straight-line "bridge" cutting
+         *  across the otherwise jagged HR trace, screenshot-confirmed): gap threshold for
+         *  [addHeartRateLine] — a break in HR readings longer than this starts a new line segment
+         *  instead of drawing a straight line across the gap. Originally calibrated assuming "normal
+         *  Wear sampling is 1-5 min" — but the stepsDebugInfo/hrDebugInfo diagnostics on this user's
+         *  actual watch showed readings arriving roughly every 7-8 SECONDS when connected (n=1740 in
+         *  ~3.5h). Against that density, a real few-minutes reporting gap is still far below the old
+         *  15-min threshold — LineGraphSeries (no built-in gap-awareness, always connects consecutive
+         *  points) silently bridges it with one long straight segment, which reads as a glaring
+         *  anomaly next to the surrounding dense jaggedness. 2 min is generous headroom above normal
+         *  jitter at this sampling rate while catching genuine short reconnect gaps as real breaks. */
         // Double, not Long: compared directly against DataPoint.getX() (graph X coordinates are
         // epoch-millis as Double) — Kotlin has no implicit Double/Long comparison.
-        const val HR_GAP_THRESHOLD_MS = 15 * 60_000.0
+        const val HR_GAP_THRESHOLD_MS = 2 * 60_000.0
+
+        /** 2026-08-29: bucket width for [addStepsBars] — see its Nachtrag comment for why. Matches
+         *  SC.steps5min's own rolling-window size, so bucketing doesn't change the value semantics. */
+        const val STEPS_BUCKET_MS = 5 * 60_000L
+
+        /** 2026-08-29: bucket width for [addHeartRateLine]'s peak-per-window downsampling — see its
+         *  comment for why. Deliberately shorter than [STEPS_BUCKET_MS]: this is a peak pick, not an
+         *  average, but a wider window still throws away more of the real shape of the trend (only
+         *  one peak per 5 min vs one per 1 min) — 1 min keeps most of the visible detail while still
+         *  cutting the ~7-8s raw rate down to a sane bar/line density. */
+        const val HR_BUCKET_MS = 60_000L
 
     }
 
@@ -146,6 +163,12 @@ class BoostV2GraphData @Inject constructor(
      *  it's visible in a plain screenshot without needing logcat/adb access to the real device.
      *  Remove once the root cause is confirmed and fixed. */
     var stepsDebugInfo: String = ""
+        private set
+
+    /** 2026-08-29 TEMPORARY diagnostic (user-reported: an unexplained smooth/straight line cuts
+     *  across the dense, jagged HR trace, "kaputt macht das Bild") — set at the end of
+     *  [addHeartRateLine], same pattern as [stepsDebugInfo]. Remove once root cause is confirmed. */
+    var hrDebugInfo: String = ""
         private set
 
     private lateinit var graph: GraphView
@@ -301,11 +324,23 @@ class BoostV2GraphData @Inject constructor(
     fun addHeartRateLine(useForScale: Boolean, context: Context?) {
         val values = (overviewData.heartRateGraphSeries as PointsWithLabelGraphSeries<DataPointWithLabelInterface>)
             .getValues(Double.NEGATIVE_INFINITY, Double.POSITIVE_INFINITY)
-        val points = mutableListOf<DataPoint>()
+        val raw = mutableListOf<DataPoint>()
         while (values.hasNext()) {
             val v = values.next() ?: break
-            points.add(DataPoint(v.getX(), v.getY()))
+            raw.add(DataPoint(v.getX(), v.getY()))
         }
+        // 2026-08-29 (user discussion — real sampling rate on this watch turned out to be ~7-8s, not
+        // the assumed 1-5min, which is what caused the straight-line "bridge" artifact in the first
+        // place): bucket into 1-minute windows and keep only the PEAK (highest real BPM) reading per
+        // window — not an average, so no invented/smoothed values, just fewer of the real ones shown.
+        // Peak chosen over "latest" (which is what addStepsBars uses) because for HR a brief spike
+        // (waking, movement) is usually the meaningful signal, not whichever reading happened to be
+        // last in the minute. Positioned at the peak reading's OWN real timestamp, not the bucket
+        // boundary. Sorted ascending afterward — BaseSeries.java's constructor requires it, groupBy
+        // doesn't guarantee it across bucket keys.
+        val points = raw.groupBy { (it.getX() / HR_BUCKET_MS).toLong() }
+            .map { (_, group) -> group.maxByOrNull { it.getY() }!! }
+            .sortedBy { it.getX() }
         // 2026-08-28 bug found via screenshot (emulator has no HR source at all, so this path is
         // always hit there): the old code set minY/maxY only AFTER an empty-check early return —
         // with no data at all, the class-level minY/maxY sentinels (Double.MAX_VALUE/MIN_VALUE,
@@ -320,17 +355,28 @@ class BoostV2GraphData @Inject constructor(
             minY = 30.0
             maxY = maxHR
         }
-        if (points.isEmpty()) return
+        // 2026-08-29 TEMPORARY diagnostic (user-reported: an unexplained smooth/straight line cuts
+        // across the dense, jagged HR trace) — see [hrDebugInfo] KDoc.
+        if (points.isEmpty()) {
+            hrDebugInfo = "n=${raw.size}->0"
+            return
+        }
         val color = rh.gac(context, app.aaps.core.ui.R.attr.heartRateColor)
         var segment = mutableListOf(points[0])
+        var segCount = 1
+        var maxGapMin = 0.0
         for (i in 1 until points.size) {
-            if (points[i].getX() - points[i - 1].getX() > HR_GAP_THRESHOLD_MS) {
+            val gapMs = points[i].getX() - points[i - 1].getX()
+            if (gapMs / 60_000.0 > maxGapMin) maxGapMin = gapMs / 60_000.0
+            if (gapMs > HR_GAP_THRESHOLD_MS) {
                 addHrLineSegment(segment, color)
                 segment = mutableListOf()
+                segCount++
             }
             segment.add(points[i])
         }
         addHrLineSegment(segment, color)
+        hrDebugInfo = "n=${raw.size}->${points.size} segs=$segCount maxGap=${"%.1f".format(maxGapMin)}min"
     }
 
     /** A single unbroken run of HR readings (no gap > [HR_GAP_THRESHOLD_MS] inside it). Segments
@@ -400,9 +446,22 @@ class BoostV2GraphData @Inject constructor(
             val v = values.next() ?: break
             raw.add(v.getX() to v.getY())
         }
+        // 2026-08-29 (root cause confirmed via stepsDebugInfo: n=2376 raw readings in ~5h — some
+        // watches report every ~8s, not every 5min as SC's own KDoc assumes. BarGraphSeries.draw()
+        // divides the available screen width by the number of bars — with thousands of raw points
+        // crammed into ~900px, each bar rounds down to well under a pixel and becomes invisible,
+        // even though the data itself and the axis scale were always correct). Bucket into 5-minute
+        // slots and keep only the LATEST reading per slot — SC.steps5min is already a rolling
+        // 5-minute count, so this doesn't lose information, it just drops redundant near-duplicate
+        // readings the same 5-minute window would otherwise all restate. Sorted ascending afterward
+        // — BaseSeries.java's own constructor KDoc requires it ("array has to be sorted from lowest
+        // x-value to the highest"), groupBy doesn't guarantee that across bucket keys.
+        val bucketed = raw.groupBy { (x, _) -> (x / STEPS_BUCKET_MS).toLong() }
+            .map { (_, group) -> group.maxByOrNull { it.first }!! }
+            .sortedBy { it.first }
         // 100.0 fallback (no real data) mirrors addHeartRateLine's fallback; 1.15 = 15% headroom
         // so the tallest real bar isn't clipped at the very top of its band.
-        val maxSteps = raw.maxOfOrNull { it.second } ?: 100.0
+        val maxSteps = bucketed.maxOfOrNull { it.second } ?: 100.0
         if (useForScale) {
             minY = 0.0
             maxY = max(1.0, maxSteps * 1.15)
@@ -416,15 +475,15 @@ class BoostV2GraphData @Inject constructor(
         stepsDebugInfo = if (raw.isEmpty()) {
             "n=0 scale=${if (useForScale) "P" else "S"} $origInfo"
         } else {
-            val lastX = raw.maxOf { it.first }
-            val lastY = raw.first { it.first == lastX }.second
-            "n=${raw.size} last=${timeFmt.format(java.util.Date(lastX.toLong()))}@${lastY.toInt()} scale=${if (useForScale) "P" else "S"} $origInfo"
+            val lastX = bucketed.maxOf { it.first }
+            val lastY = bucketed.first { it.first == lastX }.second
+            "n=${raw.size}->${bucketed.size} last=${timeFmt.format(java.util.Date(lastX.toLong()))}@${lastY.toInt()} scale=${if (useForScale) "P" else "S"} $origInfo"
         }
         if (raw.isEmpty()) return
         // 3% of the day's own peak, floored at 1.0 so a near-flat/sedentary day (tiny maxSteps)
         // still gets a visible-but-clearly-minimal stub rather than an invisible sliver.
         val zeroStubHeight = max(maxSteps * 0.03, 1.0)
-        val points = raw.map { (x, realSteps) ->
+        val points = bucketed.map { (x, realSteps) ->
             StepsBarPoint(x = x, realSteps = realSteps, displayY = if (realSteps <= 0.0) zeroStubHeight else realSteps)
         }
         val activeColor = rh.gac(context, app.aaps.core.ui.R.attr.stepsColor)
@@ -673,7 +732,19 @@ class BoostV2GraphData @Inject constructor(
         graph.viewport.setMaxX(endTime.toDouble())
         graph.viewport.setMinX(fromTime.toDouble())
         graph.viewport.isXAxisBoundsManual = true
-        graph.gridLabelRenderer.labelFormatter = TimeAsXAxisLabelFormatter("HH")
+        // 2026-08-29 (user-reported: duplicate-looking hour labels in the V2-exclusive "3h" zoom
+        // level, e.g. "12 12 13 13 14 14 15"). Root cause: numHorizontalLabels=7 and the "HH"-only
+        // format are both copied unchanged from stock GraphData.kt, whose narrowest zoom option is
+        // 6h — at 6h/7 labels (~51 min apart) hour collisions are rare; V2 additionally offers 3h
+        // (its own range button, not present in stock at all — see v2_range_3h), where 180min/7
+        // ≈ 26 min apart makes same-hour ticks the common case, not an edge case, with an "HH"-only
+        // formatter unable to tell them apart. Switch to "HH:mm" whenever the window is narrow
+        // enough for that to matter; keep the original "HH" for wider windows to avoid needless
+        // clutter where it was never a problem. Fixes the main graph too — it calls this same
+        // function (BoostOverviewV2Fragment.kt's `graphData.formatAxis(...)`), not a separate path.
+        val windowMs = endTime - fromTime
+        val labelFormat = if (windowMs <= 8 * 3_600_000L) "HH:mm" else "HH"
+        graph.gridLabelRenderer.labelFormatter = TimeAsXAxisLabelFormatter(labelFormat)
         graph.gridLabelRenderer.numHorizontalLabels = 7
     }
 
