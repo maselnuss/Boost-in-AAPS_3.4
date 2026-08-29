@@ -63,6 +63,16 @@ class PreparePredictionsWorker(
         if (predictionsAvailable && apsResult != null && menuChartSettings[0][OverviewMenus.CharType.PRE.ordinal]) {
             var predictionHours = (ceil(apsResult.latestPredictionsTime - System.currentTimeMillis().toDouble()) / (60 * 60 * 1000)).toInt()
             predictionHours = min(2, predictionHours)
+            // 2026-08-29 (user-reported: Boost V2's "3h" zoom showed almost nothing but the
+            // prediction line) — the flat 2h cap above eats a negligible share of a 24h window
+            // (~8%) but ~67% of a 3h one, because it's subtracted straight off rangeToDisplay for
+            // how much PAST data even gets fetched from the DB (hoursToFetch below) — this isn't
+            // just a display truncation, the "missing" historical points literally never get
+            // queried. Scale the cap to a quarter of whatever range is actually showing. Only
+            // Boost V2's "3h" option can ever trigger this — stock's narrowest zoom is 6h, where
+            // ceil(6/4)=2 matches the pre-existing flat cap exactly, so every other screen's
+            // behavior is byte-for-byte unchanged.
+            predictionHours = min(predictionHours, ceil(data.overviewData.rangeToDisplay / 4.0).toInt())
             predictionHours = max(0, predictionHours)
             val hoursToFetch = data.overviewData.rangeToDisplay - predictionHours
             data.overviewData.toTime = calendar.timeInMillis + 100000 // little bit more to avoid wrong rounding - GraphView specific
