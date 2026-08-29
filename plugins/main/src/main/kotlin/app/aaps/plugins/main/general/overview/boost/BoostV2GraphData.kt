@@ -17,7 +17,6 @@ import app.aaps.core.graph.data.GlucoseValueDataPoint
 import app.aaps.core.graph.data.LineGraphSeries
 import app.aaps.core.graph.data.PointsWithLabelGraphSeries
 import app.aaps.core.graph.data.ScaledDataPoint
-import app.aaps.core.graph.data.TimeAsXAxisLabelFormatter
 import app.aaps.core.interfaces.overview.OverviewData
 import app.aaps.core.interfaces.profile.ProfileFunction
 import app.aaps.core.interfaces.profile.ProfileUtil
@@ -186,13 +185,35 @@ class BoostV2GraphData @Inject constructor(
     }
 
     fun addBgReadings(addPredictions: Boolean, context: Context?) {
-        maxY = if (overviewData.bgReadingsArray.isEmpty()) {
+        val bgSeries = overviewData.bgReadingGraphSeries as PointsWithLabelGraphSeries<DataPointWithLabelInterface>
+        // 2026-08-29 (user-reported, screenshot: V2-exclusive "3h" zoom showed an axis reaching 280
+        // while the visible curve never exceeded ~130) — `overviewData.maxBgValue` is computed by a
+        // shared background worker (PrepareBgDataWorker) whose own fromTime/toTime window isn't
+        // guaranteed to already be refreshed to match a just-changed zoom level (3h has no stock
+        // equivalent, so this path was never exercised at that granularity before). The axis then
+        // reflects a wider/stale window's peak instead of what's actually on screen. Recompute
+        // locally from the ACTUAL series points bounded to the current viewport — same defensive
+        // pattern already used for Steps/HR bucketing — instead of trusting a value that may not
+        // correspond to the window really being shown.
+        val windowed = bgSeries.getValues(overviewData.fromTime.toDouble(), overviewData.endTime.toDouble())
+        var realMax = Double.MIN_VALUE
+        while (windowed.hasNext()) {
+            val v = windowed.next() ?: break
+            if (v.getY() > realMax) realMax = v.getY()
+        }
+        // Same margin convention as PrepareBgDataWorker.addUpperChartMargin, plus the same
+        // "always show at least the configured High line" floor via OverviewHighMark.
+        val highMark = preferences.get(UnitDoubleKey.OverviewHighMark)
+        maxY = if (realMax == Double.MIN_VALUE) {
             if (units == GlucoseUnit.MGDL) 180.0 else 10.0
-        } else overviewData.maxBgValue
+        } else {
+            val withHighMark = max(realMax, highMark)
+            if (units == GlucoseUnit.MGDL) Round.roundTo(withHighMark, 40.0) + 80 else Round.roundTo(withHighMark, 2.0) + 4
+        }
         minY = 0.0
-        addSeries(overviewData.bgReadingGraphSeries as PointsWithLabelGraphSeries<DataPointWithLabelInterface>)
+        addSeries(bgSeries)
         if (addPredictions) addSeries(overviewData.predictionsGraphSeries as PointsWithLabelGraphSeries<DataPointWithLabelInterface>)
-        (overviewData.bgReadingGraphSeries as PointsWithLabelGraphSeries<DataPointWithLabelInterface>).setOnDataPointTapListener { _, dataPoint ->
+        bgSeries.setOnDataPointTapListener { _, dataPoint ->
             if (dataPoint is GlucoseValueDataPoint) ToastUtils.infoToast(context, dataPoint.label)
         }
     }
@@ -738,14 +759,48 @@ class BoostV2GraphData @Inject constructor(
         // 6h — at 6h/7 labels (~51 min apart) hour collisions are rare; V2 additionally offers 3h
         // (its own range button, not present in stock at all — see v2_range_3h), where 180min/7
         // ≈ 26 min apart makes same-hour ticks the common case, not an edge case, with an "HH"-only
-        // formatter unable to tell them apart. Switch to "HH:mm" whenever the window is narrow
-        // enough for that to matter; keep the original "HH" for wider windows to avoid needless
-        // clutter where it was never a problem. Fixes the main graph too — it calls this same
-        // function (BoostOverviewV2Fragment.kt's `graphData.formatAxis(...)`), not a separate path.
-        val windowMs = endTime - fromTime
-        val labelFormat = if (windowMs <= 8 * 3_600_000L) "HH:mm" else "HH"
-        graph.gridLabelRenderer.labelFormatter = TimeAsXAxisLabelFormatter(labelFormat)
+        // formatter unable to tell them apart. First fix used a blanket "HH:mm" below a window-size
+        // threshold, but the user preferred the terser "HH" wherever it isn't actually ambiguous
+        // (2026-08-29 follow-up) — [HourMinuteXAxisFormatter] below picks per-TICK instead of
+        // per-window: minutes only when a tick doesn't land on the hour. At 3h/7 labels, fromTime/
+        // toTime are hour-aligned (OverviewDataImpl.initRange()) so ticks alternate exactly on the
+        // hour and half-hour — this naturally prints "20 20:30 21 21:30 ..." instead of either an
+        // all-"HH" collision or an all-"HH:mm" wall of text. At 6h+ (1h+ spacing) ticks land on
+        // whole hours anyway, so it prints identically to the plain "HH" formatter there — no
+        // separate window-size branch needed any more. Fixes the main graph too — it calls this
+        // same function (BoostOverviewV2Fragment.kt's `graphData.formatAxis(...)`), not a separate path.
+        graph.gridLabelRenderer.labelFormatter = HourMinuteXAxisFormatter()
         graph.gridLabelRenderer.numHorizontalLabels = 7
+    }
+
+    /**
+     * X-axis label formatter that shows just the hour ("20") when a tick lands on (or within 2.5
+     * min of, to absorb [OverviewDataImpl]'s own ~100s rounding epsilon on `toTime`) a whole hour,
+     * and "HH:mm" ("20:30") otherwise — see [formatAxis]'s KDoc for why. Extends the same
+     * `DefaultLabelFormatter` base as the stock `TimeAsXAxisLabelFormatter`, just picks the pattern
+     * per tick instead of once for the whole axis. Rounds the DISPLAYED value to the nearest 5 min
+     * too (not just the hour-check), so a tick a few seconds off a clean mark still reads as one.
+     */
+    private class HourMinuteXAxisFormatter : DefaultLabelFormatter() {
+        private val hourFormat = java.text.SimpleDateFormat("HH", Locale.getDefault())
+        private val hourMinuteFormat = java.text.SimpleDateFormat("HH:mm", Locale.getDefault())
+        override fun formatLabel(value: Double, isValueX: Boolean): String {
+            if (!isValueX) {
+                // 2026-08-29: same guard as the stock TimeAsXAxisLabelFormatter this replaces — its
+                // own comment documents a real, previously-hit NPE from GridLabelRenderer calling
+                // into DefaultLabelFormatter.formatLabel with isValueX=false at a point where its
+                // internal viewport reference can be null. Never reproduced directly, but the guard
+                // is cheap and this class is a straight swap for that one, so it keeps it.
+                return try {
+                    super.formatLabel(value, false)
+                } catch (ignored: Exception) {
+                    ""
+                }
+            }
+            val roundedMs = Math.round(value / 300_000.0) * 300_000L // nearest 5 min
+            val cal = java.util.Calendar.getInstance().apply { timeInMillis = roundedMs }
+            return if (cal.get(java.util.Calendar.MINUTE) == 0) hourFormat.format(roundedMs) else hourMinuteFormat.format(roundedMs)
+        }
     }
 
     /**
