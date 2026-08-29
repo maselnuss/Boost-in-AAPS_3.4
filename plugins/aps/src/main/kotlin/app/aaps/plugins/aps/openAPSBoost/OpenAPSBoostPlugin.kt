@@ -2124,11 +2124,13 @@ open class OpenAPSBoostPlugin @Inject constructor(
             runCatching {
                 v5decision?.let { d ->
                     val b = d.aggressionBudget
-                    it.reason.append(
-                        "boostV5Budget=${d.mealHypothesis},${Round.roundTo(b.budget, 0.001)}," +
-                            "${Round.roundTo(d.velocityFactor, 0.001)},${Round.roundTo(d.actionMultiplier, 0.001)}," +
-                            "${Round.roundTo(b.mlHypoRiskScale, 0.001)},${Round.roundTo(b.postExerciseRecoveryScale, 0.001)}; "
-                    )
+                    // 2026-08-29: mirrored into consoleError too (user request) — was reason-only
+                    // until now, same gap as twin=/antBackout=/anticip= (found on this same audit).
+                    val budgetNote = "boostV5Budget=${d.mealHypothesis},${Round.roundTo(b.budget, 0.001)}," +
+                        "${Round.roundTo(d.velocityFactor, 0.001)},${Round.roundTo(d.actionMultiplier, 0.001)}," +
+                        "${Round.roundTo(b.mlHypoRiskScale, 0.001)},${Round.roundTo(b.postExerciseRecoveryScale, 0.001)}; "
+                    it.reason.append(budgetNote)
+                    it.consoleError?.add(budgetNote.trimEnd(' ', ';'))
                 }
             }.onFailure { t -> aapsLogger.error(LTag.APS, "Dose-budget shadow failed (swallowed — dosing untouched)", t) }
             // COMMITTED->RECOVERING backoff-loosening SHADOW (2026-08-27, user request re: post-meal
