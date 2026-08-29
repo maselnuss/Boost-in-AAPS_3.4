@@ -3,9 +3,13 @@ package app.aaps.plugins.main.general.overview.boost
 import android.annotation.SuppressLint
 import android.content.res.ColorStateList
 import android.graphics.Color
+import android.graphics.Typeface
 import android.os.Bundle
 import android.os.Handler
 import android.os.HandlerThread
+import android.text.SpannableStringBuilder
+import android.text.Spanned
+import android.text.style.StyleSpan
 import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
@@ -708,25 +712,84 @@ class BoostOverviewV2Fragment : DaggerFragment(), View.OnClickListener {
             "Boost V6 ${bs.v5State.verb}, score ${String.format(Locale.getDefault(), "%.2f", bs.v5Score)}, dose ${String.format(Locale.getDefault(), "%.2f", bs.v5FinalDose)} units"
     }
 
+    // ── Structured debug dialogs: bold section headers and label/value lines instead of the flat
+    //    scriptDebug dump. ──
+
+    companion object {
+
+        /** Matches the engine's own section dividers, e.g. "── Glucose ─────" (U+2500 BOX DRAWINGS
+         *  LIGHT HORIZONTAL, as emitted by DetermineBasalBoost). Group 1 = the section name. */
+        private val SECTION_HEADER_REGEX = Regex("^─{2,}\\s*(.+?)\\s*─{2,}$")
+
+        /** Pure decorative divider lines ("════..." title borders) with no name attached — dropped,
+         *  the bold section headers replace that visual job. */
+        private val SEPARATOR_ONLY_REGEX = Regex("^[═─\\s]+$")
+    }
+
+    private fun appendBold(sb: SpannableStringBuilder, text: String) {
+        val start = sb.length
+        sb.append(text)
+        sb.setSpan(StyleSpan(Typeface.BOLD), start, sb.length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+    }
+
+    /** Blank line + bold "▎ Name" + newline — visually distinct from a label:value line. */
+    private fun appendSectionHeader(sb: SpannableStringBuilder, name: String) {
+        if (sb.isNotEmpty()) sb.append("\n\n")
+        appendBold(sb, "▎ $name")
+        sb.append("\n")
+    }
+
+    private fun appendLabelValue(sb: SpannableStringBuilder, label: String, value: String) {
+        appendBold(sb, "$label: ")
+        sb.append(value).append("\n")
+    }
+
+    /** Re-parses the engine's raw scriptDebug dump into bold section headers plus the lines of each section. */
+    private fun appendFormattedScriptDebug(sb: SpannableStringBuilder, rawText: String) {
+        if (rawText.isBlank()) {
+            appendSectionHeader(sb, "Script Debug")
+            sb.append("(no debug output)")
+            return
+        }
+        var sectionOpened = false
+        for (rawLine in rawText.split("\n")) {
+            val line = rawLine.trim()
+            if (line.isEmpty() || SEPARATOR_ONLY_REGEX.matches(line)) continue
+            val sectionMatch = SECTION_HEADER_REGEX.find(line)
+            if (sectionMatch != null) {
+                appendSectionHeader(sb, sectionMatch.groupValues[1])
+                sectionOpened = true
+                continue
+            }
+            if (!sectionOpened) {
+                appendSectionHeader(sb, "Overview")
+                sectionOpened = true
+            }
+            sb.append(line).append("\n")
+        }
+    }
+
     @SuppressLint("SetTextI18n")
     private fun showV5Detail() {
         val a = activity ?: return
         val bs = lastBoostStatus
-        val sb = StringBuilder()
-        sb.append("State: ${bs.v5State.label} (${bs.v5State.verb}) · age ${bs.v5Age} cycle${if (bs.v5Age == 1) "" else "s"}")
-        sb.append("\n\nMeal score: ${String.format(Locale.getDefault(), "%.2f", bs.v5Score)}   (enter 0.44 · confirm 0.55)")
-        sb.append("\nAction multiplier: ×${String.format(Locale.getDefault(), "%.2f", bs.v5ActionMult)}")
-        sb.append("\nAggression budget: ${String.format(Locale.getDefault(), "%.2f", bs.v5Budget)}U")
-        sb.append("\nDose this cycle: ${String.format(Locale.getDefault(), "%.2f", bs.v5FinalDose)}U")
-        sb.append("\n\nBrakes:")
-        if (bs.v5Brakes.isEmpty()) sb.append("\n  none")
+        val sb = SpannableStringBuilder()
+        appendSectionHeader(sb, "Decision")
+        appendLabelValue(sb, "State", "${bs.v5State.label} (${bs.v5State.verb}) · age ${bs.v5Age} cycle${if (bs.v5Age == 1) "" else "s"}")
+        appendLabelValue(sb, "Meal score", "${String.format(Locale.getDefault(), "%.2f", bs.v5Score)}   (enter 0.44 · confirm 0.55)")
+        appendLabelValue(sb, "Action multiplier", "×${String.format(Locale.getDefault(), "%.2f", bs.v5ActionMult)}")
+        appendLabelValue(sb, "Aggression budget", "${String.format(Locale.getDefault(), "%.2f", bs.v5Budget)}U")
+        appendLabelValue(sb, "Dose this cycle", "${String.format(Locale.getDefault(), "%.2f", bs.v5FinalDose)}U")
+        appendLabelValue(sb, "Delta accel", "${String.format(Locale.getDefault(), "%.1f", bs.deltaAccl)}%")
+        appendBold(sb, "Brakes:")
+        sb.append("\n")
+        if (bs.v5Brakes.isEmpty()) sb.append("  none\n")
         else bs.v5Brakes.forEach { b ->
-            if (b.isHard) sb.append("\n  ⛔ ${b.label} (hard disable)")
-            else sb.append("\n  ${b.label}: ×${String.format(Locale.getDefault(), "%.2f", b.factor)}")
+            if (b.isHard) sb.append("  ⛔ ${b.label} (hard disable)\n")
+            else sb.append("  ${b.label}: ×${String.format(Locale.getDefault(), "%.2f", b.factor)}\n")
         }
-        sb.append("\n\nDelta accel: ${String.format(Locale.getDefault(), "%.1f", bs.deltaAccl)}%")
-        sb.append("\n\n--- Script Debug ---\n${bs.scriptDebugText.ifEmpty { "(no debug output)" }}")
-        OKDialog.show(a, "Boost V6 decision", sb.toString())
+        appendFormattedScriptDebug(sb, bs.scriptDebugText)
+        OKDialog.show(a, "Boost V6 decision", sb)
     }
 
     // --- Profile ---
@@ -1180,12 +1243,14 @@ class BoostOverviewV2Fragment : DaggerFragment(), View.OnClickListener {
                 }
                 R.id.v2_pill_tdd -> {
                     val bs = lastBoostStatus
-                    OKDialog.show(a, "Total Daily Dose",
-                        "oapsProfile.TDD: ${if (bs.tddWeighted > 0) String.format(Locale.getDefault(), "%.1f", bs.tddWeighted) else "(not set)"}\n" +
-                            "TDD from debug: ${if (bs.tddFromDebug > 0) String.format(Locale.getDefault(), "%.1f", bs.tddFromDebug) else "(not found)"}\n" +
-                            "TDD 7d avg: ${String.format(Locale.getDefault(), "%.1f", bs.tdd7d)}\n" +
-                            "TDD 24h: ${String.format(Locale.getDefault(), "%.1f", bs.tdd24h)}\n\n" +
-                            "--- Script Debug ---\n${bs.scriptDebugText.ifEmpty { "(no debug output)" }}")
+                    val sb = SpannableStringBuilder()
+                    appendSectionHeader(sb, "Total Daily Dose")
+                    appendLabelValue(sb, "oapsProfile.TDD", if (bs.tddWeighted > 0) String.format(Locale.getDefault(), "%.1f", bs.tddWeighted) else "(not set)")
+                    appendLabelValue(sb, "TDD from debug", if (bs.tddFromDebug > 0) String.format(Locale.getDefault(), "%.1f", bs.tddFromDebug) else "(not found)")
+                    appendLabelValue(sb, "TDD 7d avg", String.format(Locale.getDefault(), "%.1f", bs.tdd7d))
+                    appendLabelValue(sb, "TDD 24h", String.format(Locale.getDefault(), "%.1f", bs.tdd24h))
+                    appendFormattedScriptDebug(sb, bs.scriptDebugText)
+                    OKDialog.show(a, "Total Daily Dose", sb)
                 }
                 R.id.v2_pill_profile -> {
                     // Profile pill opens the standard profile-switch dialog. Meal-management
@@ -1210,11 +1275,13 @@ class BoostOverviewV2Fragment : DaggerFragment(), View.OnClickListener {
                     val exerciseTargetStr = if (bs.targetBgMgdl > 0)
                         "${profileUtil.fromMgdlToStringInUnits(bs.targetBgMgdl)} $unitsLabel"
                     else "---"
-                    OKDialog.show(a, "Exercise / Activity Mode",
-                        "Current: ${bs.activityDetail}\n\n" +
-                            "Exercise target: $exerciseTargetStr\n\n" +
-                            "Profile: ${bs.profilePercentage}%\n\n" +
-                            "--- Script Debug ---\n${bs.scriptDebugText.ifEmpty { "(no debug output)" }}")
+                    val sb = SpannableStringBuilder()
+                    appendSectionHeader(sb, "Activity")
+                    appendLabelValue(sb, "Current", bs.activityDetail)
+                    appendLabelValue(sb, "Exercise target", exerciseTargetStr)
+                    appendLabelValue(sb, "Profile", "${bs.profilePercentage}%")
+                    appendFormattedScriptDebug(sb, bs.scriptDebugText)
+                    OKDialog.show(a, "Exercise / Activity Mode", sb)
                 }
 
                 // Bottom action buttons
