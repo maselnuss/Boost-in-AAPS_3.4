@@ -1148,19 +1148,30 @@ open class OpenAPSBoostPlugin @Inject constructor(
         // Publish the step-based sleep-in state for next cycle's night-mode evaluation. (2026-07-02)
         sleepInActiveCached = activityResult.sleepInActive
 
-        // 0. Floor/slew shadow (Konzept 1, 2026-08-26) — rolling ISF-floor/slew-limiter ESTIMATE,
-        // log-only, never touches oapsProfile/dosing. The expensive part (DB query over up to 14
-        // days) only runs at most every 30min; the resulting suggestion is CACHED and re-logged
-        // every cycle in between, so every NS reason string in a 30-min block carries the current
-        // standing estimate, not just the one cycle that happened to recompute it. See
-        // BoostFloorSlewShadow.kt for the full design rationale.
-        if (floorSlewShadowEnabled && now - lastFloorSlewComputeMs >= floorSlewRecomputeIntervalMs) {
+        // 0+0b. Floor/slew shadow (Konzept 1) + Overshoot-guard COMPUTED-variant (Konzept 10) —
+        // both rolling ESTIMATES, log-only, never touch oapsProfile/dosing. Each recomputes on its
+        // OWN independent 30-min throttle (unchanged below); the resulting suggestion is CACHED and
+        // re-logged every cycle in between. See BoostFloorSlewShadow.kt / BoostOvershootGuardShadow.kt
+        // for the full design rationale.
+        //
+        // 2026-08-30 (memory-pressure investigation, user question "does this hang together with the
+        // freezes?"): both blocks used to run their OWN independent 14-day persistenceLayer.getApsResults()
+        // scan (~4000 rows each on a mature install) — since the two 30-min timers are independent,
+        // they could occasionally land in the SAME cycle and briefly hold TWO full 14-day result lists
+        // in memory at once. Sharing a single fetch (only when at least one of the two is actually due
+        // this cycle) removes that double-peak possibility entirely and halves DB round-trips in the
+        // common case — the individual per-shadow throttle/logic below is otherwise byte-for-byte
+        // unchanged, so this does not alter either shadow's computed suggestion, only how the underlying
+        // data gets fetched.
+        val floorSlewDue = floorSlewShadowEnabled && now - lastFloorSlewComputeMs >= floorSlewRecomputeIntervalMs
+        val overshootGuardDue = overshootGuardShadowEnabled && now - lastOvershootGuardComputeMs >= overshootGuardRecomputeIntervalMs
+        val sharedLong14dResults = if (floorSlewDue || overshootGuardDue) persistenceLayer.getApsResults(now - 14 * 24 * 3600_000L, now) else null
+
+        if (floorSlewDue) {
             lastFloorSlewComputeMs = now
             try {
                 val shortSince = now - 2 * 24 * 3600_000L
-                val longSince = now - 14 * 24 * 3600_000L
-                val longResults = persistenceLayer.getApsResults(longSince, now)
-                val samples = longResults.mapNotNull { r ->
+                val samples = sharedLong14dResults!!.mapNotNull { r ->
                     val vs = r.variableSens
                     val profileSens = r.oapsProfileBoost?.sens
                     if (vs == null || profileSens == null || profileSens <= 0.0) null
@@ -1177,10 +1188,6 @@ open class OpenAPSBoostPlugin @Inject constructor(
             }
         }
 
-        // 0b. Overshoot-guard COMPUTED-variant rolling estimate (2026-08-27, Konzept 10). Same
-        // throttle/caching pattern as Floor/Slew above — a 14d APSResult scan is too heavy for
-        // every 5-min cycle, so recompute at most every overshootGuardRecomputeIntervalMs and
-        // re-log the cached estimate every cycle in between. See BoostOvershootGuardShadow.kt.
         // eventualBG isn't a structured APSResult field, so it's parsed from the historical reason
         // text ("Eventual BG X") — same resilient-parse pattern already used for live NS analysis
         // of this exact field; unparseable/older-format entries are simply skipped, not fatal.
@@ -1196,13 +1203,12 @@ open class OpenAPSBoostPlugin @Inject constructor(
         // used for the recoveringShadow=/aimiGuardShadow=-successor logic above (fails closed: a
         // record without that tag, e.g. from before it existed, is simply skipped like unparseable
         // eventualBG).
-        if (overshootGuardShadowEnabled && now - lastOvershootGuardComputeMs >= overshootGuardRecomputeIntervalMs) {
+        if (overshootGuardDue) {
             lastOvershootGuardComputeMs = now
             try {
-                val since = now - 14 * 24 * 3600_000L
                 val eventualBgRegex = Regex("""Eventual BG (-?\d+\.?\d*)""")
                 val accelMealStateRegex = Regex("""accelMeal=-?\d+,-?\d+\.?\d*,-?\d+\.?\d*,-?\d+\.?\d*,-?\d+\.?\d*,(\w+)""")
-                val overshootSamples = persistenceLayer.getApsResults(since, now).mapNotNull { r ->
+                val overshootSamples = sharedLong14dResults!!.mapNotNull { r ->
                     val stateMatch = accelMealStateRegex.find(r.reason) ?: return@mapNotNull null
                     if (stateMatch.groupValues[1] != "COMMITTED") return@mapNotNull null
                     val m = eventualBgRegex.find(r.reason) ?: return@mapNotNull null
