@@ -2139,30 +2139,62 @@ open class OpenAPSBoostPlugin @Inject constructor(
                     it.consoleError?.add(budgetNote.trimEnd(' ', ';'))
                 }
             }.onFailure { t -> aapsLogger.error(LTag.APS, "Dose-budget shadow failed (swallowed — dosing untouched)", t) }
-            // COMMITTED->RECOVERING backoff-loosening SHADOW (2026-08-27, user request re: post-meal
-            // peak/rebound backtest). READ-ONLY telemetry — compares the LIVE backoff predicate
-            // (deltaAccl < RECOVERING_DECEL_THRESHOLD AND long>short>delta, i.e. MealHypothesis.kt's
-            // windowCycles=2) against a loosened variant that drops the long-avg leg (only requires
-            // short>delta, windowCycles=1). The 2026-08-27 backtest (14d reason-text replay) found
-            // windowCycles=2 almost never fires within a COMMITTED run's lifetime (CGM noise breaks
-            // the 3-point long>short>delta chain), while windowCycles=1 fires ~1 cycle earlier in
-            // 13/44 runs (~10U SMB avoided over 14d) at a ~15% premature-brake rate (BG still rising
-            // >15 mg/dl in the next 15 min). BACKOFF_GUARD_MAX_DELTA filters the two premature cases
-            // found in that backtest (both had delta ~11-12 mg/dl/5min despite deltaAccl < -5%) —
-            // logged separately so the guard's real hit rate can be validated against live data
-            // before any dosing change is considered. Never affects dosing; only logged while V5
-            // currently holds COMMITTED (the only state this predicate is evaluated in). Gated
-            // behind ApsBoostRecoveringBackoffShadowEnabled (default off) — see the preference screen.
+            // COMMITTED->RECOVERING backoff SHADOW (2026-08-27, user request re: post-meal
+            // peak/rebound backtest). READ-ONLY telemetry — three variants side by side:
+            //  - looseWouldFire: drops the long-avg leg entirely (only requires short>delta,
+            //    "windowCycles=1"). The 2026-08-27 backtest (14d reason-text replay) found this
+            //    fires ~1 cycle earlier than the real gate in 13/44 runs (~10U SMB avoided over
+            //    14d) at a ~15% premature-brake rate (BG still rising >15 mg/dl in the next 15 min).
+            //  - guardedWouldFire: loose + BACKOFF_GUARD_MAX_DELTA filter, which catches both
+            //    premature cases found in that backtest (both had delta ~11-12 mg/dl/5min despite
+            //    deltaAccl < -5%).
+            //  - strictWouldFire (2026-08-30, user request re: a real live over-brake — COMMITTED
+            //    fired at 12:17 on a single-cycle deceleration blip while BG kept climbing hard for
+            //    another 20+ min, only corrected by RECOVERING's own re-engage safety net): the
+            //    OPPOSITE direction — guarded + the full long>short>delta ordering (the real gate's
+            //    own "windowCycles=2" concept, one MORE consecutive deceleration checkpoint than
+            //    guarded requires). Tests whether a STRICTER gate would have avoided today's
+            //    premature brake without missing genuine peaks — the mirror question to loose/
+            //    guarded above (which test whether an EARLIER brake would help; the 2026-08-27
+            //    backtest's answer there was "barely, and with a real false-brake cost").
+            // Never affects dosing; only logged while V5 currently holds COMMITTED (the only state
+            // this predicate is evaluated in). Gated behind ApsBoostRecoveringBackoffShadowEnabled
+            // (default off) — see the preference screen.
             if (recoveringBackoffShadowEnabled) {
                 runCatching {
                     if (v5decision?.mealHypothesis == MealHypothesis.COMMITTED) {
+                        val long = glucoseStatus.longAvgDelta
                         val short = glucoseStatus.shortAvgDelta
                         val delta = glucoseStatus.delta
                         val deltaAcclNow = 100.0 * (delta - short) / max(abs(short), 2.0)
                         val looseWouldFire = deltaAcclNow < RECOVERING_DECEL_THRESHOLD && short > delta
                         val guardedWouldFire = looseWouldFire && delta < BACKOFF_GUARD_MAX_DELTA
-                        val note = "recoveringShadow=$looseWouldFire,$guardedWouldFire," +
-                            "${Round.roundTo(deltaAcclNow, 0.1)},${Round.roundTo(delta, 0.1)}; "
+                        // 2026-08-30 (user request, real live case: COMMITTED->RECOVERING fired at
+                        // 12:17 on a single-cycle deceleration blip while BG kept climbing hard for
+                        // another 20+ min — RECOVERING's own re-engage safety net had to correct it).
+                        // Tests the OPPOSITE direction from loose/guarded above: not "would a LOOSER
+                        // gate have backed off even earlier", but "would a STRICTER gate have avoided
+                        // today's premature brake, without missing genuine peaks". Adds the full
+                        // long>short>delta ordering this shadow's own KDoc already describes as the
+                        // real gate's concept (long-, short-, and instantaneous delta all strictly
+                        // decreasing) on top of the existing guard filter — one more consecutive
+                        // deceleration checkpoint than loose/guarded require. Self-contained (reuses
+                        // glucoseStatus' own long/short/delta, no new state or history buffer needed).
+                        //
+                        // 2026-08-30 follow-up (checked against today's real 12:17 numbers: long=9.9
+                        // vs short=9.3 — a bare long>short WAS already true right at the premature
+                        // brake, so this specific boolean would NOT have caught today's case; only a
+                        // MARGIN like long-short>2.0 would have (true first at 12:22, 5 min later) —
+                        // but 2.0 is a guessed illustration, not a validated number). Rather than
+                        // hardcode a guessed margin threshold now, log the raw short/long themselves —
+                        // together with delta/deltaAcclNow already below, this lets ANY future margin
+                        // or threshold (on any of the three delta measures, not just this one) be
+                        // tested retroactively against real data during the Sept review, instead of
+                        // locking in an unvalidated guess in the Kotlin code today.
+                        val strictWouldFire = guardedWouldFire && long > short
+                        val note = "recoveringShadow=$looseWouldFire,$guardedWouldFire,$strictWouldFire," +
+                            "${Round.roundTo(deltaAcclNow, 0.1)},${Round.roundTo(delta, 0.1)}," +
+                            "${Round.roundTo(short, 0.1)},${Round.roundTo(long, 0.1)}; "
                         it.reason.append(note)
                         // 2026-08-28: mirrored into consoleError too (user request) — same
                         // visibility as floorSlewShadow/alcoholShadow, checkable in-app without NS.
@@ -2170,6 +2202,23 @@ open class OpenAPSBoostPlugin @Inject constructor(
                     }
                 }.onFailure { t -> aapsLogger.error(LTag.APS, "Recovering-backoff shadow failed (swallowed — dosing untouched)", t) }
             }
+            // committedCapShadow (2026-08-30, user request — Gegenstueck to confirmedCapShadow's
+            // analysis-side raw-vs-cap comparison, but for the COMMITTED per-cycle holding dose).
+            // Unlike recoveringShadow/floorSlewShadow above, this needs NO enable toggle: it does
+            // no extra computation or DB work — v5decision.rawPrecapU is a value V5 already
+            // computes every cycle regardless (the dose one step before the state cap), so this is
+            // purely formatting three already-known numbers into a string, same cost class as the
+            // "V6-ACTIVE drove SMB..." line below. Never affects dosing (read-only; the state cap
+            // was already applied upstream — this just makes the pre-cap value visible).
+            runCatching {
+                if (v5decision?.mealHypothesis == MealHypothesis.COMMITTED) {
+                    val committedCap = preferences.get(DoubleKey.ApsBoostV5CommittedCapU)
+                    val note = "committedCapShadow=${Round.roundTo(v5decision.rawPrecapU, 0.001)}," +
+                        "${Round.roundTo(committedCap, 0.001)},${Round.roundTo(v5decision.finalDose, 0.001)}; "
+                    it.reason.append(note)
+                    it.consoleError?.add(note.trimEnd(' ', ';'))
+                }
+            }.onFailure { t -> aapsLogger.error(LTag.APS, "committedCapShadow failed (swallowed — dosing untouched)", t) }
             // Overshoot-guard SHADOW (2026-08-27, Konzept 10, see BoostOvershootGuardShadow.kt) —
             // 3rd backoff candidate alongside recoveringShadow= above. A CONTINUOUS multiplier on
             // the prospective dose, scaled by how far eventualBG already exceeds target — no state

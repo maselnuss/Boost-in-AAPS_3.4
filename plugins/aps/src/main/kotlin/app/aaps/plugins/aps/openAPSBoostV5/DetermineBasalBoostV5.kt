@@ -211,6 +211,14 @@ data class V5Decision(
      *  shadow step() call in [decide]. READ-ONLY, never affects dosing. */
     val aggressiveConfirmShadowState: MealHypothesis = MealHypothesis.IDLE,
     val aggressiveConfirmShadowAge: Int = 0,
+    /** 2026-08-30 (user request, committedCapShadow=): the dose BEFORE the state cap
+     *  (confirmedCapU/committedCapU) is applied — i.e. [insulinToDeliver] one step earlier.
+     *  For CONFIRMED cycles this equals [prospectiveConfirmShot] by construction (same formula,
+     *  same cycle); exposed generally here so the CURRENT state's cap (not just CONFIRMED's) can
+     *  be shadow-compared against what the algorithm would have delivered uncapped. Read-only,
+     *  never affects dosing — [insulinToDeliver] (the already-capped value) is what's actually
+     *  used downstream. → `committedCapShadow=` in OpenAPSBoostPlugin.kt. */
+    val rawPrecapU: Double = 0.0,
 )
 
 // ===== 2026-07-20 V1-acceleration early primer (LIVE) — backtesting/scripts/2026-07-v1-acceleration =====
@@ -585,6 +593,7 @@ class DetermineBasalBoostV5 @Inject constructor() {
             primerUseTempBasal = inputs.primerUseTempBasal,
             aggressiveConfirmShadowState = aggressiveConfirmShadowState.state,
             aggressiveConfirmShadowAge = aggressiveConfirmShadowState.ageCycles,
+            rawPrecapU = velocityScaled,
         )
     }
 }
