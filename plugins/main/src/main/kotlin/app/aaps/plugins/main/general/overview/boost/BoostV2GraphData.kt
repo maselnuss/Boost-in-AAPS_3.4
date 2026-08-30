@@ -108,6 +108,13 @@ class BoostV2GraphData @Inject constructor(
          *  applyV2Theme() re-applies this to the BG & IOB graphs on every refresh, so this
          *  constant (not the one-time onViewCreated setup) is the effective colour. */
         val LABEL_COLOR = Color.parseColor("#aaaaaa")
+
+        /** 2026-08-30 — see [formatAxis]'s Nachtrag. Above this span, X-axis labels always round to
+         *  the nearest whole hour (never print minutes); at or below it, per-tick 5-min rounding is
+         *  used so the V2-exclusive 3h zoom still gets its intentional half-hour labels. Picked well
+         *  above the 3h view's own max span (3h history + capped ≤1h prediction = 4h) and well below
+         *  the narrowest stock zoom option (6h) — 5h leaves a full hour of margin on both sides. */
+        const val ROUND_TO_HOUR_THRESHOLD_MS = 5 * 3_600_000L
     }
 
     // ── Internal state (mirrors GraphData) ───────────────────────────────
@@ -571,7 +578,28 @@ class BoostV2GraphData @Inject constructor(
         // whole hours anyway, so it prints identically to the plain "HH" formatter there — no
         // separate window-size branch needed any more. Fixes the main graph too — it calls this
         // same function (BoostOverviewV2Fragment.kt's `graphData.formatAxis(...)`), not a separate path.
-        graph.gridLabelRenderer.labelFormatter = HourMinuteXAxisFormatter()
+        //
+        // 2026-08-30 Nachtrag (user-reported, live-reproduced via a fresh device screenshot): the
+        // "6h+ ticks land on whole hours anyway" assumption above is NOT always true. fromTime/endTime
+        // aren't always stamped from the same "now" — OverviewDataImpl.initRange() sets an initial
+        // toTime, then PreparePredictionsWorker (a SEPARATE background worker, own independent
+        // "nextFullHour(now)" calculation) overwrites fromTime/toTime/endTime again when predictions
+        // are available. If that second worker's "now" happens to have ticked into a different minute
+        // window than the first's, the two ends of the visible range no longer share one common
+        // reference point, and the total span stops being a clean multiple of an hour — producing an
+        // occasional stray "11:05" among otherwise-clean "08 09 10" labels. Confirmed intermittent
+        // live: the SAME 6h view rendered perfectly clean moments later once both workers' "now"
+        // happened to agree again. Same root pattern (independent worker timing) as the earlier
+        // 3h-window Y-axis staleness fix, just the X-axis this time — fixed the same way: locally,
+        // without touching the shared workers. Only the V2-exclusive 3h zoom actually NEEDS
+        // half-hour-precision labels (see the KDoc above); every stock zoom level (6h/12h/18h/24h)
+        // only ever wants whole hours anyway, so for any window wider than [ROUND_TO_HOUR_THRESHOLD_MS]
+        // the formatter now always rounds to the nearest HOUR (not 5 min) for display — this can never
+        // print a stray minute again there, regardless of any future worker-timing skew, without
+        // touching the underlying fromTime/endTime data at all (the plotted data itself is unaffected,
+        // only how axis labels round for display). Threshold picked well above the 3h view's own max
+        // span (3h history + capped ≤1h prediction = 4h) and well below the narrowest stock option (6h).
+        graph.gridLabelRenderer.labelFormatter = HourMinuteXAxisFormatter(roundToWholeHour = endTime - fromTime > ROUND_TO_HOUR_THRESHOLD_MS)
         graph.gridLabelRenderer.numHorizontalLabels = 7
     }
 
@@ -582,8 +610,13 @@ class BoostV2GraphData @Inject constructor(
      * `DefaultLabelFormatter` base as the stock `TimeAsXAxisLabelFormatter`, just picks the pattern
      * per tick instead of once for the whole axis. Rounds the DISPLAYED value to the nearest 5 min
      * too (not just the hour-check), so a tick a few seconds off a clean mark still reads as one.
+     *
+     * @param roundToWholeHour 2026-08-30 — when true (windows wider than [ROUND_TO_HOUR_THRESHOLD_MS],
+     *   i.e. every stock zoom level), rounds to the nearest HOUR instead of nearest 5 min, so it can
+     *   only ever print a bare hour — see [formatAxis]'s Nachtrag for why this is needed even though
+     *   6h+ "should" already land on whole hours.
      */
-    private class HourMinuteXAxisFormatter : DefaultLabelFormatter() {
+    private class HourMinuteXAxisFormatter(private val roundToWholeHour: Boolean) : DefaultLabelFormatter() {
         private val hourFormat = java.text.SimpleDateFormat("HH", Locale.getDefault())
         private val hourMinuteFormat = java.text.SimpleDateFormat("HH:mm", Locale.getDefault())
         override fun formatLabel(value: Double, isValueX: Boolean): String {
@@ -598,6 +631,10 @@ class BoostV2GraphData @Inject constructor(
                 } catch (ignored: Exception) {
                     ""
                 }
+            }
+            if (roundToWholeHour) {
+                val roundedMs = Math.round(value / 3_600_000.0) * 3_600_000L // nearest whole hour
+                return hourFormat.format(roundedMs)
             }
             val roundedMs = Math.round(value / 300_000.0) * 300_000L // nearest 5 min
             val cal = java.util.Calendar.getInstance().apply { timeInMillis = roundedMs }
