@@ -1769,7 +1769,8 @@ open class OpenAPSBoostPlugin @Inject constructor(
             // post-rescue tier guard, so this flag is true exactly when V1's own dose is the
             // hypo-restrained one. Logged every cycle as boostV5_postRescueWindow (shadow and active)
             // so the 2026-07-10 live review can audit windows without CGM reconstruction.
-            val inPostRescueWindow = recentLowBG45Min < DetermineBasalBoost.POST_RESCUE_LOW_THRESHOLD_MGDL
+            // "<=" kept in sync with the DetermineBasalBoost copy of this comparison.
+            val inPostRescueWindow = recentLowBG45Min <= DetermineBasalBoost.POST_RESCUE_LOW_THRESHOLD_MGDL
             it.boostV5_postRescueWindow = inPostRescueWindow
             // Cumulative-cap telemetry (2026-07-06): the rolling-60-min anti-stacking cap and the
             // volume it compares against were previously invisible in NS — a cap suppression looked
