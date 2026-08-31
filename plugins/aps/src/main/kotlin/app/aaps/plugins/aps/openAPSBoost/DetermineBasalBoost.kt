@@ -1478,7 +1478,12 @@ class DetermineBasalBoost @Inject constructor(
                 // Blocks T3 (UAM_BOOST), T4 (UAM_HIGH_BOOST), and T5 (PERCENT_SCALE) when the
                 // 45-min rolling-min BG is below 75. See DetermineBasalBoostV3MLG3 for full
                 // backtest rationale — same 45-min window and tier scope as v4.4.4 acting layer.
-                val inPostRescueWindow = recentLowBG45Min < POST_RESCUE_LOW_THRESHOLD_MGDL
+                // 2026-08-31 (user request, real incident: recentLowBG45Min landed EXACTLY on
+                // 75.0 — a strict "<" let a near-max CONFIRMED shot through 100 min after a
+                // genuine 46 mg/dl hypo). "<=" so a reading exactly at the threshold still counts
+                // as still-recovering, not yet clear. Must stay in sync with the OpenAPSBoostPlugin
+                // copy of this same comparison (see its KDoc: "alignment is load-bearing").
+                val inPostRescueWindow = recentLowBG45Min <= POST_RESCUE_LOW_THRESHOLD_MGDL
                 if (inPostRescueWindow) {
                     consoleError.add("⚠ Post-rescue recovery: recentLowBG45Min ${round(recentLowBG45Min, 0)} < ${POST_RESCUE_LOW_THRESHOLD_MGDL.toInt()} — UAM tiers T3/T4 + T5 PERCENT_SCALE blocked")
                 }

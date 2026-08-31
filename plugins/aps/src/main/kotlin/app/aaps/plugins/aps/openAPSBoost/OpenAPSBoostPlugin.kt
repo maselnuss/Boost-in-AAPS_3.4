@@ -183,6 +183,22 @@ open class OpenAPSBoostPlugin @Inject constructor(
         const val BACKOFF_GUARD_MAX_DELTA = 8.0
 
         /**
+         * Konzept 2 — Rebound-Guard / "Post-Hypo-Schutzschalter" SHADOW (2026-08-31). Documented
+         * since 21.-23.08 in Claude_boost_extension_ideas.md (Abschnitt 4/4.1/4.1.1) as "Konzept 2",
+         * never built until a real 5th incident (2026-08-31 08:47: 46 mg/dl hypo nadir -> ~100 min
+         * later a near-max 2.5U CONFIRMED shot; the existing 45-min post-rescue cap missed it, both
+         * because the window doesn't reach back 100 min and because the reading right at the edge
+         * was exactly 75.0, not below). Threshold + window per that doc's own 37-day backtest: 60
+         * mg/dl gave 67% precision (2/2 real saves, 1 false alarm) vs. 14-20% at 65-75 mg/dl (same
+         * 2/2 real saves, 8-12 false alarms) — lower threshold catches the same real cases with far
+         * fewer false alarms on this user's tightly-controlled baseline. 75-min window is AIMI's own
+         * CorrectionAggressionGate lookback, deliberately NOT the existing 45-min post-rescue window
+         * (a separate, already-tuned mechanism — see DetermineBasalBoost.kt POST_RESCUE_LOW_THRESHOLD_MGDL).
+         */
+        const val REBOUND_GUARD_LOOKBACK_MIN = 75L
+        const val REBOUND_GUARD_THRESHOLD_MGDL = 60.0
+
+        /**
          * Minutes since [lastTapMs] (epoch ms), or [Int.MAX_VALUE] if there has never been a tap
          * ([lastTapMs] == 0, the LongNonKey default) — MAX_VALUE guarantees it never falls inside
          * any real window below, so "never tapped" and "tapped ages ago" both cleanly read as
@@ -357,6 +373,8 @@ open class OpenAPSBoostPlugin @Inject constructor(
     // Konzept 10 (2026-08-27) — see BoostOvershootGuardShadow.kt + recoveringShadow= call site.
     private val recoveringBackoffShadowEnabled; get() = preferences.getBoostDosing(BooleanKey.ApsBoostRecoveringBackoffShadowEnabled)
     private val overshootGuardShadowEnabled; get() = preferences.getBoostDosing(BooleanKey.ApsBoostOvershootGuardShadowEnabled)
+    // Konzept 2 (2026-08-31) — see reboundGuardShadow= call site.
+    private val reboundGuardShadowEnabled; get() = preferences.getBoostDosing(BooleanKey.ApsBoostReboundGuardShadowEnabled)
     private val postExerciseMinDuration; get() = preferences.getBoostDosing(IntKey.ApsBoostPostExerciseMinDuration)
 
     // ---- Feed-health edge detection (F4/F6, 2026-07-07) ----
@@ -1973,7 +1991,10 @@ open class OpenAPSBoostPlugin @Inject constructor(
             // post-rescue tier guard, so this flag is true exactly when V1's own dose is the
             // hypo-restrained one. Logged every cycle as boostV5_postRescueWindow (shadow and active)
             // so the 2026-07-10 live review can audit windows without CGM reconstruction.
-            val inPostRescueWindow = recentLowBG45Min < DetermineBasalBoost.POST_RESCUE_LOW_THRESHOLD_MGDL
+            // 2026-08-31 (user request, real incident 08:47: recentLowBG45Min was EXACTLY 75.0 —
+            // strict "<" let a near-max 2.5U CONFIRMED shot through ~100 min after a genuine
+            // 46 mg/dl hypo). "<=" kept in sync with the DetermineBasalBoost copy above.
+            val inPostRescueWindow = recentLowBG45Min <= DetermineBasalBoost.POST_RESCUE_LOW_THRESHOLD_MGDL
             it.boostV5_postRescueWindow = inPostRescueWindow
             // Cumulative-cap telemetry (2026-07-06): the rolling-60-min anti-stacking cap and the
             // volume it compares against were previously invisible in NS — a cap suppression looked
@@ -2219,6 +2240,29 @@ open class OpenAPSBoostPlugin @Inject constructor(
                     it.consoleError?.add(note.trimEnd(' ', ';'))
                 }
             }.onFailure { t -> aapsLogger.error(LTag.APS, "committedCapShadow failed (swallowed — dosing untouched)", t) }
+            // Konzept 2 — Rebound-Guard / "Post-Hypo-Schutzschalter" SHADOW (2026-08-31, user
+            // request, see REBOUND_GUARD_* KDoc above for the full backtest rationale). SHADOW
+            // ONLY, never suppresses anything — logs whether the guard WOULD have fired, plus the
+            // actual SMB dose (it.units) and temp-basal rate (it.rate) delivered that cycle, so a
+            // later analysis can see how much insulin flowed during rebound windows. Own,
+            // independent DB fetch (own 75-min window, only runs when the toggle is on) —
+            // deliberately does NOT reuse/widen the existing recentBgReadings/recentLowBG45Min
+            // (60-min/45-min) fetch above, so this can't alter that mechanism's semantics.
+            if (reboundGuardShadowEnabled) {
+                runCatching {
+                    val lookbackFrom = System.currentTimeMillis() - REBOUND_GUARD_LOOKBACK_MIN * 60 * 1000L
+                    val lookback = persistenceLayer.getBgReadingsDataFromTimeToTime(lookbackFrom, System.currentTimeMillis(), true)
+                        .sortedBy { it.timestamp }
+                    val wouldFire = lookback.zipWithNext().any { (a, b) ->
+                        a.value < REBOUND_GUARD_THRESHOLD_MGDL && b.value < REBOUND_GUARD_THRESHOLD_MGDL
+                    }
+                    val lookbackMin = lookback.minOfOrNull { it.value }?.toDouble() ?: 999.0
+                    val note = "reboundGuardShadow=$wouldFire,${Round.roundTo(lookbackMin, 0.1)}," +
+                        "${Round.roundTo(it.units ?: 0.0, 0.001)},${Round.roundTo(it.rate ?: -1.0, 0.01)}; "
+                    it.reason.append(note)
+                    it.consoleError?.add(note.trimEnd(' ', ';'))
+                }.onFailure { t -> aapsLogger.error(LTag.APS, "Rebound-guard shadow failed (swallowed — dosing untouched)", t) }
+            }
             // Overshoot-guard SHADOW (2026-08-27, Konzept 10, see BoostOvershootGuardShadow.kt) —
             // 3rd backoff candidate alongside recoveringShadow= above. A CONTINUOUS multiplier on
             // the prospective dose, scaled by how far eventualBG already exceeds target — no state
@@ -3345,6 +3389,8 @@ open class OpenAPSBoostPlugin @Inject constructor(
                     // Konzept 10 (2026-08-27) — see BoostOvershootGuardShadow.kt.
                     addPreference(AdaptiveSwitchPreference(ctx = context, booleanKey = BooleanKey.ApsBoostRecoveringBackoffShadowEnabled, summary = R.string.boost_recovering_backoff_shadow_enabled_summary, title = R.string.boost_recovering_backoff_shadow_enabled_title))
                     addPreference(AdaptiveSwitchPreference(ctx = context, booleanKey = BooleanKey.ApsBoostOvershootGuardShadowEnabled, summary = R.string.boost_overshoot_guard_shadow_enabled_summary, title = R.string.boost_overshoot_guard_shadow_enabled_title))
+                    // Konzept 2 (2026-08-31) — see reboundGuardShadow= call site.
+                    addPreference(AdaptiveSwitchPreference(ctx = context, booleanKey = BooleanKey.ApsBoostReboundGuardShadowEnabled, summary = R.string.boost_rebound_guard_shadow_enabled_summary, title = R.string.boost_rebound_guard_shadow_enabled_title))
                 })
             })
         }

@@ -726,6 +726,9 @@ class BoostOverviewV2Fragment : DaggerFragment(), View.OnClickListener {
             "postExerciseHyperBrakeShadow:", "v6PreMealShadow:", "recoveringShadow=",
             "overshootGuardFixedShadow=", "overshootGuardComputedShadow=", "alcoholShadow:",
             "aggConfirmShadow=", "accelMeal=", "boostV5Budget=", "twin=", "antBackout=", "anticip=",
+            // 2026-08-30/31: added when built, missed adding here at the time -- both are read-only
+            // shadow tags (never affect dosing), belong in this section like the others above.
+            "committedCapShadow=", "reboundGuardShadow=",
         )
 
         /** Matches the engine's own section dividers, e.g. "── Glucose ─────" (built with U+2500

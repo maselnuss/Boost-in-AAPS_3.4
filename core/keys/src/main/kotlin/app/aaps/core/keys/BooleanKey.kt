@@ -102,6 +102,12 @@ enum class BooleanKey(
     //    not split further: they're a deliberate side-by-side comparison pair (fixed vs.
     //    self-calibrated coefficients), splitting them would defeat that comparison.
     ApsBoostOvershootGuardShadowEnabled("boost_overshoot_guard_shadow_enabled", false, defaultedBySM = true),
+    // Konzept 2 (2026-08-31) — Rebound-Guard / "Post-Hypo-Schutzschalter" SHADOW. Documented since
+    // 21.-23.08 in Claude_boost_extension_ideas.md (Abschnitt 4/4.1/4.1.1), never built until a
+    // real 5th incident (46 mg/dl hypo -> ~100 min later a near-max CONFIRMED shot). Checks: were
+    // there 2 consecutive RAW BG readings <60 mg/dl in the last 75 min (own window, independent of
+    // the existing 45-min post-rescue cap)? SHADOW ONLY, logs only, never applied.
+    ApsBoostReboundGuardShadowEnabled("boost_rebound_guard_shadow_enabled", false, defaultedBySM = true),
     ApsBoostBypassVersionCheck("boost_bypass_version_check", true, defaultedBySM = true),
     // Boost V5 active-dosing alpha (2026-06-11) — when ON, V5's observe-confirm-commit SMB REPLACES
     // V1's SMB on cycles V1 permits one. V1 still owns basal + all safety gates. Toggle OFF = instant revert.
