@@ -297,9 +297,12 @@ class DetermineBasalBoost @Inject constructor(
         // BS.Type.SMB. Setting cumulativeSmbCap60Min = 0.0 disables.
         recentSmbVolume60Min: Double = 0.0,
         cumulativeSmbCap60Min: Double = 1.5,
-        // v4.4.4 hotfix Fix A v2 (ported to V1 2026-06-01): 45-min rolling minimum BG used only
-        // by Fix A post-rescue tier gating. Default 999.0 = disabled (legacy callers).
+        // v4.4.4 hotfix Fix A v2 (ported to V1 2026-06-01): rolling minimum BG (window controlled
+        // by ApsBoostPostRescueWindowMinutes in the caller) used only by Fix A post-rescue tier
+        // gating. Default 999.0 = disabled (legacy callers).
         recentLowBG45Min: Double = 999.0,
+        // Caller-supplied post-rescue threshold; default equals POST_RESCUE_LOW_THRESHOLD_MGDL.
+        postRescueLowThresholdMgdl: Double = POST_RESCUE_LOW_THRESHOLD_MGDL,
         // v12 ML feature (2026-06-06): minutes since the most recent BS.Type.SMB
         // bolus in the PersistenceLayer, capped at 720. Default 720.0 = "no recent
         // SMB" so legacy callers don't change inference behaviour. The plugin
@@ -1550,9 +1553,9 @@ class DetermineBasalBoost @Inject constructor(
                 // backtest rationale — same 45-min window and tier scope as v4.4.4 acting layer.
                 // "<=": a rolling-min reading exactly at the threshold still counts as still-recovering.
                 // Must stay in sync with the OpenAPSBoostPlugin copy of this comparison.
-                val inPostRescueWindow = recentLowBG45Min <= POST_RESCUE_LOW_THRESHOLD_MGDL
+                val inPostRescueWindow = recentLowBG45Min <= postRescueLowThresholdMgdl
                 if (inPostRescueWindow) {
-                    consoleError.add("⚠ Post-rescue recovery: recentLowBG45Min ${round(recentLowBG45Min, 0)} < ${POST_RESCUE_LOW_THRESHOLD_MGDL.toInt()} — UAM tiers T3/T4 + T5 PERCENT_SCALE blocked")
+                    consoleError.add("⚠ Post-rescue recovery: recentLowBG45Min ${round(recentLowBG45Min, 0)} <= ${postRescueLowThresholdMgdl.toInt()} — UAM tiers T3/T4 + T5 PERCENT_SCALE blocked")
                 }
 
                 // Decision tree debug

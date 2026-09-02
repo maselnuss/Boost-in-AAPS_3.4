@@ -27,6 +27,9 @@ enum class UnitDoubleKey(
 
     // Boost
     ApsBoostDynIsfBgCap("boost_dynisf_bg_cap", 210.0, 100, 300, defaultedBySM = true),
+    // Post-rescue cap threshold. Default 75.0 reproduces DetermineBasalBoost.POST_RESCUE_LOW_THRESHOLD_MGDL.
+    // Shared by V1's tier block and V6's meal-state-exemption cap.
+    ApsBoostPostRescueLowThreshold("boost_post_rescue_low_threshold", 75.0, 40, 100, defaultedBySM = true),
     ApsBoostDynIsfNormalTarget("boost_dynisf_normal_target", 99.0, 70, 120, defaultedBySM = true),
     ApsBoostNightModeBgOffset("boost_night_mode_bg_offset", 27.0, 0, 90, defaultedBySM = true),
     ApsBoostPostExerciseRecoveryTarget("boost_post_exercise_recovery_target", 144.0, 90, 200, defaultedBySM = true),

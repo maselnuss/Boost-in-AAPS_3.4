@@ -74,6 +74,8 @@ enum class IntKey(
     // Health Connect poll cadence (minutes between sync attempts)
     ApsBoostHealthConnectPollMin("boost_health_connect_poll_min", 5, 1, 30, defaultedBySM = true),
     ApsBoostPostExerciseMinDuration("boost_post_exercise_min_duration", 10, 1, 120, defaultedBySM = true),
+    // Post-rescue cap lookback window (minutes). Default 45 reproduces the previous fixed window.
+    ApsBoostPostRescueWindowMinutes("boost_post_rescue_window_minutes", 45, 15, 180, defaultedBySM = true),
     AutosensPeriod("openapsama_autosens_period", 24, 4, 24, calculatedDefaultValue = true),
     MaintenanceLogsAmount("maintenance_logs_amount", 2, 1, 10, defaultedBySM = true),
     AlertsStaleDataThreshold("missed_bg_readings_threshold", 30, 15, 10000, defaultedBySM = true, dependency = BooleanKey.AlertMissedBgReading),

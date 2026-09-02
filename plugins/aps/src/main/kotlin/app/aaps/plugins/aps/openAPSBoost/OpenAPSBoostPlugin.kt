@@ -474,6 +474,10 @@ open class OpenAPSBoostPlugin @Inject constructor(
     private val hrWindowMinutes; get() = preferences.getBoostDosing(IntKey.ApsBoostHrWindowMinutes)
     private val hrStressDetection; get() = preferences.getBoostDosing(BooleanKey.ApsBoostHrStressDetection)
 
+    // Post-rescue cap: threshold + lookback window (user-adjustable; defaults = previous constants)
+    private val postRescueLowThreshold; get() = profileUtil.convertToMgdlDetect(preferences.getBoostDosing(UnitDoubleKey.ApsBoostPostRescueLowThreshold, profileUtil))
+    private val postRescueWindowMinutes; get() = preferences.getBoostDosing(IntKey.ApsBoostPostRescueWindowMinutes)
+
     // Post-exercise recovery
     private val postExerciseRecoveryEnabled; get() = preferences.getBoostDosing(BooleanKey.ApsBoostPostExerciseRecoveryEnabled)
     private val postExerciseRecoveryHours; get() = preferences.getBoostDosing(DoubleKey.ApsBoostPostExerciseRecoveryHours)
@@ -1433,12 +1437,14 @@ open class OpenAPSBoostPlugin @Inject constructor(
 
         // 6. Recent BG nadir + braking signal (for fast-carb detection)
         val now60MinAgo = System.currentTimeMillis() - 60 * 60 * 1000L
-        val now45MinAgo = System.currentTimeMillis() - 45 * 60 * 1000L
         val recentBgReadings = persistenceLayer.getBgReadingsDataFromTimeToTime(now60MinAgo, System.currentTimeMillis(), true)
         val recentLowBG = recentBgReadings.minOfOrNull { it.value }?.toDouble() ?: 999.0
-        // v4.4.4 hotfix Fix A v2 (ported to V1 2026-06-01): 45-min rolling minimum used only by
-        // Fix A post-rescue tier gating. See V3MLG3 plugin/determine_basal for backtest rationale.
-        val recentLowBG45Min = recentBgReadings.filter { it.timestamp >= now45MinAgo }.minOfOrNull { it.value }?.toDouble() ?: 999.0
+        // v4.4.4 hotfix Fix A v2 (ported to V1 2026-06-01): rolling minimum used only by Fix A
+        // post-rescue tier gating. Window = ApsBoostPostRescueWindowMinutes (default 45). Own fetch,
+        // not a sub-filter of the 60-min readings above, because the window can exceed 60 min.
+        val nowPostRescueWindowAgo = System.currentTimeMillis() - postRescueWindowMinutes * 60_000L
+        val recentLowBG45Min = persistenceLayer.getBgReadingsDataFromTimeToTime(nowPostRescueWindowAgo, System.currentTimeMillis(), true)
+            .minOfOrNull { it.value }?.toDouble() ?: 999.0
         // Braking product: max(|delta2| × (delta2 - delta1)) across consecutive triplets
         // where delta2 < 0 (still falling) and delta2 > delta1 (deceleration).
         // High values indicate rapid carb absorption arresting a fall — fast-carb signal
@@ -1706,6 +1712,7 @@ open class OpenAPSBoostPlugin @Inject constructor(
             recentSmbVolume60Min = recentSmbVolume60Min,
             cumulativeSmbCap60Min = cumulativeSmbCap60Min,
             recentLowBG45Min = recentLowBG45Min,
+            postRescueLowThresholdMgdl = postRescueLowThreshold,
             timeSinceLastSmbMin = timeSinceLastSmbMin,
             postRescueTightRampCap = tightRampCap
         ).also {
@@ -1770,7 +1777,7 @@ open class OpenAPSBoostPlugin @Inject constructor(
             // hypo-restrained one. Logged every cycle as boostV5_postRescueWindow (shadow and active)
             // so the 2026-07-10 live review can audit windows without CGM reconstruction.
             // "<=" kept in sync with the DetermineBasalBoost copy of this comparison.
-            val inPostRescueWindow = recentLowBG45Min <= DetermineBasalBoost.POST_RESCUE_LOW_THRESHOLD_MGDL
+            val inPostRescueWindow = recentLowBG45Min <= postRescueLowThreshold
             it.boostV5_postRescueWindow = inPostRescueWindow
             // Cumulative-cap telemetry (2026-07-06): the rolling-60-min anti-stacking cap and the
             // volume it compares against were previously invisible in NS — a cap suppression looked
@@ -2767,6 +2774,8 @@ open class OpenAPSBoostPlugin @Inject constructor(
                 // engine Safety category — NOT just V1's SMB-sizing screen. 0 disables; auto-config
                 // sets it per user (up to ~confirmedCap, so the key's max must cover the cohort).
                 addPreference(AdaptiveDoublePreference(ctx = context, doubleKey = DoubleKey.ApsBoostCumulativeSmbCap60Min, dialogMessage = R.string.boost_cumulative_smb_cap_summary, title = R.string.boost_cumulative_smb_cap_title))
+                addPreference(AdaptiveUnitPreference(ctx = context, unitKey = UnitDoubleKey.ApsBoostPostRescueLowThreshold, dialogMessage = R.string.boost_post_rescue_low_threshold_summary, title = R.string.boost_post_rescue_low_threshold_title))
+                addPreference(AdaptiveIntPreference(ctx = context, intKey = IntKey.ApsBoostPostRescueWindowMinutes, dialogMessage = R.string.boost_post_rescue_window_minutes_summary, title = R.string.boost_post_rescue_window_minutes_title))
                 // allow-all-BG-sources + bypass-version-check toggles removed 2026-06-27 —
                 // both are now forced always-on in code (no longer user-facing levers).
                 // V5/V6 controls intentionally NOT here — they live in the selectable "Boost V5"
