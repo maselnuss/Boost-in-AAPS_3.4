@@ -3391,34 +3391,46 @@ open class OpenAPSBoostPlugin @Inject constructor(
                     )
                 )
 
-                // ── 7a. Shadow Concepts — home for all pure-computation SHADOW-ONLY concepts
-                //     (Konzept 1, Konzept 10, ...). Nothing here ever touches dosing/target — every
-                //     entry only reads already-available cycle data and logs a comparison. GPS
-                //     activity detection (Konzept 8) deliberately lives OUTSIDE this screen, under
-                //     Health Connect Settings — it registers a live Android OS listener/permission,
-                //     a different kind of thing from a pure computed estimate, even though its
-                //     dosing impact is currently also shadow-only. A CHILD of "7. Advanced
-                //     Settings" (2026-08-28, corrected — an earlier pass made it a top-level
-                //     sibling here while OpenAPSBoostV5Plugin.kt kept it nested, an inconsistency
-                //     depending on which engine is selected; the agreed, screenshot-verified
-                //     placement is nested, one level up from where it lived originally, not
-                //     promoted out of Advanced entirely).
-                addPreference(preferenceManager.createPreferenceScreen(context).apply {
-                    key = "boost_shadow_concepts_settings"
-                    title = rh.gs(R.string.boost_shadow_concepts_title)
-                    summary = rh.gs(R.string.boost_shadow_concepts_summary)
-                    // Konzept 1 (2026-08-26) — see BoostFloorSlewShadow.kt.
-                    addPreference(AdaptiveSwitchPreference(ctx = context, booleanKey = BooleanKey.ApsBoostFloorSlewShadowEnabled, summary = R.string.boost_floor_slew_shadow_enabled_summary, title = R.string.boost_floor_slew_shadow_enabled_title))
-                    addPreference(AdaptiveDoublePreference(ctx = context, doubleKey = DoubleKey.ApsBoostFloorSlewAggressiveness, dialogMessage = R.string.boost_floor_slew_aggressiveness_summary, title = R.string.boost_floor_slew_aggressiveness_title))
-                    // Konzept 10 (2026-08-27) — see BoostOvershootGuardShadow.kt.
-                    addPreference(AdaptiveSwitchPreference(ctx = context, booleanKey = BooleanKey.ApsBoostRecoveringBackoffShadowEnabled, summary = R.string.boost_recovering_backoff_shadow_enabled_summary, title = R.string.boost_recovering_backoff_shadow_enabled_title))
-                    addPreference(AdaptiveSwitchPreference(ctx = context, booleanKey = BooleanKey.ApsBoostOvershootGuardShadowEnabled, summary = R.string.boost_overshoot_guard_shadow_enabled_summary, title = R.string.boost_overshoot_guard_shadow_enabled_title))
-                    // Konzept 2 (2026-08-31) — see reboundGuardShadow= call site.
-                    addPreference(AdaptiveSwitchPreference(ctx = context, booleanKey = BooleanKey.ApsBoostReboundGuardShadowEnabled, summary = R.string.boost_rebound_guard_shadow_enabled_summary, title = R.string.boost_rebound_guard_shadow_enabled_title))
-                })
+                // ── 7a. Shadow Concepts — see buildShadowConceptsScreen() below. Nested here as a
+                //     child of "7. Advanced Settings" — the placement OpenAPSBoostPlugin's OWN
+                //     screen uses (2026-08-28 agreed placement). OpenAPSBoostV5Plugin does NOT call
+                //     addBoostEngineCategories for this part — it calls buildShadowConceptsScreen()
+                //     directly and attaches the result one level shallower instead (2026-09-03,
+                //     user-requested placement — directly on its own "Advanced" screen, above
+                //     Restore-backup). Single shared builder, two different attachment points —
+                //     no risk of the two ever drifting out of sync with each other again.
+                addPreference(buildShadowConceptsScreen(preferenceManager, context))
             })
         }
     }
+
+    /**
+     * Builds the "Shadow Concepts" preference screen — home for all pure-computation SHADOW-ONLY
+     * concepts (Konzept 1, Konzept 10, Konzept 2, ...). Nothing here ever touches dosing/target —
+     * every entry only reads already-available cycle data and logs a comparison. GPS activity
+     * detection (Konzept 8) deliberately lives OUTSIDE this screen, under Health Connect Settings —
+     * it registers a live Android OS listener/permission, a different kind of thing from a pure
+     * computed estimate, even though its dosing impact is currently also shadow-only.
+     *
+     * A single shared builder (2026-09-03, replacing two independently hand-maintained copies that
+     * had already drifted out of sync — OpenAPSBoostV5Plugin's copy was missing the ReboundGuard
+     * toggle added 2026-08-31) so the two callers can attach the SAME content at different screen
+     * depths without duplicating the toggle list itself. Caller decides placement; this only builds.
+     */
+    fun buildShadowConceptsScreen(preferenceManager: PreferenceManager, context: Context): PreferenceScreen =
+        preferenceManager.createPreferenceScreen(context).apply {
+            key = "boost_shadow_concepts_settings"
+            title = rh.gs(R.string.boost_shadow_concepts_title)
+            summary = rh.gs(R.string.boost_shadow_concepts_summary)
+            // Konzept 1 (2026-08-26) — see BoostFloorSlewShadow.kt.
+            addPreference(AdaptiveSwitchPreference(ctx = context, booleanKey = BooleanKey.ApsBoostFloorSlewShadowEnabled, summary = R.string.boost_floor_slew_shadow_enabled_summary, title = R.string.boost_floor_slew_shadow_enabled_title))
+            addPreference(AdaptiveDoublePreference(ctx = context, doubleKey = DoubleKey.ApsBoostFloorSlewAggressiveness, dialogMessage = R.string.boost_floor_slew_aggressiveness_summary, title = R.string.boost_floor_slew_aggressiveness_title))
+            // Konzept 10 (2026-08-27) — see BoostOvershootGuardShadow.kt.
+            addPreference(AdaptiveSwitchPreference(ctx = context, booleanKey = BooleanKey.ApsBoostRecoveringBackoffShadowEnabled, summary = R.string.boost_recovering_backoff_shadow_enabled_summary, title = R.string.boost_recovering_backoff_shadow_enabled_title))
+            addPreference(AdaptiveSwitchPreference(ctx = context, booleanKey = BooleanKey.ApsBoostOvershootGuardShadowEnabled, summary = R.string.boost_overshoot_guard_shadow_enabled_summary, title = R.string.boost_overshoot_guard_shadow_enabled_title))
+            // Konzept 2 (2026-08-31) — see reboundGuardShadow= call site.
+            addPreference(AdaptiveSwitchPreference(ctx = context, booleanKey = BooleanKey.ApsBoostReboundGuardShadowEnabled, summary = R.string.boost_rebound_guard_shadow_enabled_summary, title = R.string.boost_rebound_guard_shadow_enabled_title))
+        }
 }
 
 // ── V5/V6 exercise-input mapping (F2, 2026-07-07) ───────────────────────────────────────────────

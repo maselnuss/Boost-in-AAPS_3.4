@@ -1292,14 +1292,18 @@ open class OpenAPSBoostV5Plugin @Inject constructor(
         }
         // Shared engine settings nested under Advanced. includeEngineEssentials = false: the
         // 6 essentials above are NOT repeated inside the engine sub-screens (no duplicate keys).
-        // NOTE (2026-09-02, user report — real duplicate found+removed): addBoostEngineCategories
-        // itself already unconditionally adds "Shadow Concepts" (§7a, inside OpenAPSBoostPlugin.kt)
-        // as part of this single call — a SEPARATE hand-written "Shadow Concepts" block used to sit
-        // right here too (same key "boost_shadow_concepts_settings"), a genuine leftover self-
-        // duplicate the user could see twice in this same screen. Removed; it had also drifted
-        // stale (missing the ReboundGuard toggle added 2026-08-31, since only OpenAPSBoostPlugin's
-        // copy — the one actually used — was updated). The shared call below is now the ONLY copy.
+        // This call's own §7a nests "Shadow Concepts" inside its "Advanced Settings" sub-screen —
+        // that's the depth OpenAPSBoostPlugin's OWN screen uses, not what V5 wants (see below).
         openAPSBoostEngine.get().addBoostEngineCategories(preferenceManager, advanced, context, includeEngineEssentials = false)
+        // Shadow Concepts (2026-08-28, user request; re-placement corrected 2026-09-03) — SAME
+        // shared builder as OpenAPSBoostPlugin's own copy (buildShadowConceptsScreen — single
+        // source of truth for the toggle list, so the two placements can never drift out of sync
+        // again the way the old hand-duplicated copy did, see git history / TODO.md 2026-09-03).
+        // Attached ONE level shallower here than OpenAPSBoostPlugin's own placement — directly on
+        // this plugin's own "Advanced" screen, above the Restore-backup action below — per explicit
+        // user placement request (NOT nested inside the "Advanced Settings" sub-screen the call
+        // above just added).
+        advanced.addPreference(openAPSBoostEngine.get().buildShadowConceptsScreen(preferenceManager, context))
         // Undo safety net (2026-08-27, user request) — restore the managed knobs to their state
         // from immediately before the last (or 2nd-last) automatic AutoConfig/Periodic Review
         // apply. Added AFTER addBoostEngineCategories (2026-08-27, corrected — was previously
