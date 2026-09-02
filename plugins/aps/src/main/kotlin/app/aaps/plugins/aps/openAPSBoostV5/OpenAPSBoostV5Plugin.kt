@@ -1292,23 +1292,14 @@ open class OpenAPSBoostV5Plugin @Inject constructor(
         }
         // Shared engine settings nested under Advanced. includeEngineEssentials = false: the
         // 6 essentials above are NOT repeated inside the engine sub-screens (no duplicate keys).
+        // NOTE (2026-09-02, user report — real duplicate found+removed): addBoostEngineCategories
+        // itself already unconditionally adds "Shadow Concepts" (§7a, inside OpenAPSBoostPlugin.kt)
+        // as part of this single call — a SEPARATE hand-written "Shadow Concepts" block used to sit
+        // right here too (same key "boost_shadow_concepts_settings"), a genuine leftover self-
+        // duplicate the user could see twice in this same screen. Removed; it had also drifted
+        // stale (missing the ReboundGuard toggle added 2026-08-31, since only OpenAPSBoostPlugin's
+        // copy — the one actually used — was updated). The shared call below is now the ONLY copy.
         openAPSBoostEngine.get().addBoostEngineCategories(preferenceManager, advanced, context, includeEngineEssentials = false)
-        // Shadow Concepts (2026-08-28, user request) — home for all pure-computation SHADOW-ONLY
-        // concepts (Konzept 1, Konzept 10, ...); nothing here ever touches dosing/target. Placed
-        // directly here, between the shared "Advanced Settings" screen just added above and the
-        // Restore action below — was previously nested a confusing 3 levels deep, inside the
-        // shared engine's own "Advanced Settings" (itself inside THIS "Advanced" screen, both
-        // identically titled). Still conceptually "advanced/rarely touched" (hence staying under
-        // Advanced, not promoted to the top-level essentials above), just one hop instead of three.
-        advanced.addPreference(preferenceManager.createPreferenceScreen(context).apply {
-            key = "boost_shadow_concepts_settings"
-            title = rh.gs(R.string.boost_shadow_concepts_title)
-            summary = rh.gs(R.string.boost_shadow_concepts_summary)
-            addPreference(AdaptiveSwitchPreference(ctx = context, booleanKey = BooleanKey.ApsBoostFloorSlewShadowEnabled, summary = R.string.boost_floor_slew_shadow_enabled_summary, title = R.string.boost_floor_slew_shadow_enabled_title))
-            addPreference(AdaptiveDoublePreference(ctx = context, doubleKey = DoubleKey.ApsBoostFloorSlewAggressiveness, dialogMessage = R.string.boost_floor_slew_aggressiveness_summary, title = R.string.boost_floor_slew_aggressiveness_title))
-            addPreference(AdaptiveSwitchPreference(ctx = context, booleanKey = BooleanKey.ApsBoostRecoveringBackoffShadowEnabled, summary = R.string.boost_recovering_backoff_shadow_enabled_summary, title = R.string.boost_recovering_backoff_shadow_enabled_title))
-            addPreference(AdaptiveSwitchPreference(ctx = context, booleanKey = BooleanKey.ApsBoostOvershootGuardShadowEnabled, summary = R.string.boost_overshoot_guard_shadow_enabled_summary, title = R.string.boost_overshoot_guard_shadow_enabled_title))
-        })
         // Undo safety net (2026-08-27, user request) — restore the managed knobs to their state
         // from immediately before the last (or 2nd-last) automatic AutoConfig/Periodic Review
         // apply. Added AFTER addBoostEngineCategories (2026-08-27, corrected — was previously

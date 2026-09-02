@@ -74,6 +74,12 @@ enum class IntKey(
     // Health Connect poll cadence (minutes between sync attempts)
     ApsBoostHealthConnectPollMin("boost_health_connect_poll_min", 5, 1, 30, defaultedBySM = true),
     ApsBoostPostExerciseMinDuration("boost_post_exercise_min_duration", 10, 1, 120, defaultedBySM = true),
+    // Post-rescue cap lookback window (2026-09-02) — was hardcoded inline in OpenAPSBoostPlugin.kt
+    // ("now45MinAgo"), now user-adjustable. Default reproduces prior behaviour exactly. Real
+    // incidents (2026-08-31 08:47, 2026-09-02 18:17) showed a genuine hypo nadir >45min but <90min
+    // before a CONFIRMED shot missed the window entirely — max raised to 180 so this can be tuned
+    // without a rebuild while more data is gathered.
+    ApsBoostPostRescueWindowMinutes("boost_post_rescue_window_minutes", 45, 15, 180, defaultedBySM = true),
     AutosensPeriod("openapsama_autosens_period", 24, 4, 24, calculatedDefaultValue = true),
     MaintenanceLogsAmount("maintenance_logs_amount", 2, 1, 10, defaultedBySM = true),
     AlertsStaleDataThreshold("missed_bg_readings_threshold", 30, 15, 10000, defaultedBySM = true, dependency = BooleanKey.AlertMissedBgReading),

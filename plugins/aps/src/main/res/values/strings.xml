@@ -80,6 +80,10 @@
     <string name="boost_max_iob_summary">Maximum IOB for accelerated bolusing. Above this, regular oref1 used. Default: 1.0 U</string>
     <string name="boost_cumulative_smb_cap_title">Cumulative SMB cap (60 min)</string>
     <string name="boost_cumulative_smb_cap_summary">Total SMB insulin (U) that may be delivered in any rolling 60-minute window. Caps insulin stacking during sustained climbs. Set to 0 to disable. Factory default: 10 U (non-binding); auto-configuration tightens it to your own history (Confirmed cap + 2× Committed cap).</string>
+    <string name="boost_post_rescue_low_threshold_title">Post-rescue low threshold</string>
+    <string name="boost_post_rescue_low_threshold_summary" formatted="false">Below this BG, you\'re treated as still recovering from a recent low: V1\'s own dosing tiers are restrained, AND Boost V6 can\'t dose above what V1 itself would give in a CONFIRMED/COMMITTED meal state (which normally lets V6 dose more than V1). Lower this only if you\'re confident false triggers on ordinary lows are a real problem for you. Factory default: 75 mg/dl.</string>
+    <string name="boost_post_rescue_window_minutes_title">Post-rescue lookback window</string>
+    <string name="boost_post_rescue_window_minutes_summary" formatted="false">How far back (minutes) to check for a low BG before the post-rescue cap above can engage. Too short and a real recent low falls outside the window by the time a meal-shot fires; too long and it stays restrained long after you\'ve genuinely recovered. Factory default: 45 minutes.</string>
     <string name="boost_v5_active_dosing_title">V6 active dosing (ALPHA)</string>
     <string name="boost_v5_active_dosing_summary">EXPERIMENTAL — when ON, the V6 observe-confirm-commit engine replaces the SMB dose on cycles SMBs are permitted. The base engine still controls basal and all safety gates. WARNING: this delivers insulin from an alpha algorithm; review closely and turn OFF to revert instantly.</string>
     <string name="boost_v5_confirmed_cap_title">V6 CONFIRMED dose cap (U)</string>

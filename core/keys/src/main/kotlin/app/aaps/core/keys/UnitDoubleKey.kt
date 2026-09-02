@@ -33,4 +33,9 @@ enum class UnitDoubleKey(
     // Konzept 6 Alcohol shadow (2026-08-26) — was a hardcoded constant, now user-adjustable. Default
     // reproduces prior behaviour exactly; derived from real documented incident peaks (see AlcoholShadow.kt).
     ApsBoostAlcoholHyperBrakeThreshold("boost_alcohol_hyper_brake_threshold", 180.0, 120, 250, defaultedBySM = true),
+    // Post-rescue cap threshold (2026-09-02) — was DetermineBasalBoost.POST_RESCUE_LOW_THRESHOLD_MGDL,
+    // a hardcoded constant, now user-adjustable. Default reproduces prior behaviour exactly. Below
+    // this, V1's own tier block AND V6's meal-state-exemption cap both engage (shared threshold,
+    // "alignment is load-bearing" — see DetermineBasalBoost.kt / OpenAPSBoostPlugin.kt KDoc).
+    ApsBoostPostRescueLowThreshold("boost_post_rescue_low_threshold", 75.0, 40, 100, defaultedBySM = true),
 }
