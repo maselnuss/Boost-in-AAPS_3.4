@@ -588,8 +588,8 @@ open class OpenAPSBoostV5Plugin @Inject constructor(
         // cumulative cap is recomputed inside from the final operative per-shot caps.
         val resolutions = synchronized(configLock) { BoostV5AutoConfigApply.applyAutoConfig(
             suggestion,
-            tbrBelow70Pct = profile.tbrBelow70Pct,
-            timeBelow54Pct = profile.timeBelow54Pct,
+            tbrBelow70Pct = g.profile.tbrBelow70Pct,
+            timeBelow54Pct = g.profile.timeBelow54Pct,
             isResolved = { isResolved(it.key) },
             storedValue = { preferences.getIfExists(it) },
             put = { key, value -> preferences.put(key, value) },
@@ -637,8 +637,8 @@ open class OpenAPSBoostV5Plugin @Inject constructor(
                 // Name whichever guard(s) actually tripped (<70 raise-guard and/or the 2026-07-07
                 // <54 severe co-guard) so the user sees why the raise was held.
                 val why = buildList {
-                    if (profile.tbrBelow70Pct > BoostV5AutoConfigApply.TBR_RAISE_GUARD_PCT) add("time-below-70 is ${Math.round(profile.tbrBelow70Pct * 10.0) / 10.0}%")
-                    if (profile.timeBelow54Pct >= BoostV5AutoConfigApply.TBR54_RAISE_GUARD_PCT) add("time-below-54 is ${Math.round(profile.timeBelow54Pct * 10.0) / 10.0}%")
+                    if (g.profile.tbrBelow70Pct > BoostV5AutoConfigApply.TBR_RAISE_GUARD_PCT) add("time-below-70 is ${Math.round(g.profile.tbrBelow70Pct * 10.0) / 10.0}%")
+                    if (g.profile.timeBelow54Pct >= BoostV5AutoConfigApply.TBR54_RAISE_GUARD_PCT) add("time-below-54 is ${Math.round(g.profile.timeBelow54Pct * 10.0) / 10.0}%")
                 }.joinToString(" and ")
                 "${shortName(it.key)}: suggested ${it.suggestedValue} U from your history — not auto-applied because " +
                     "$why; set manually in Advanced if desired"
