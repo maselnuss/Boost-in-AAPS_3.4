@@ -278,11 +278,22 @@ open class OpenAPSBoostV5Plugin @Inject constructor(
     // floor stays off) until the first successful compute and whenever CGM history is too thin.
     private val TBR_GATE_REFRESH_MS = 60L * 60 * 1000         // hourly
 
-    // Konzept 7 (2026-08-26) — periodic auto-config review interval. 14 days, matching
-    // BoostV5AutoConfig.LOOKBACK_DAYS: the review re-derives from a trailing-14d V1Profile, so a
-    // 14-day cadence means each review's window has fully turned over (zero overlap) with the one
-    // the previous review used — the tightest cadence with no double-counted data.
-    private val PERIODIC_REVIEW_INTERVAL_MS = BoostV5AutoConfig.LOOKBACK_DAYS * 24L * 60 * 60 * 1000
+    // Konzept 7 (2026-08-26) — periodic auto-config review CADENCE. Deliberately its own constant
+    // and no longer derived from any lookback window (2026-09-03): cadence and derivation window are
+    // independent axes, and tying them together is what silently coupled them before.
+    //
+    // The old rationale ("14 days = the review's 14-day window has fully turned over, zero overlap")
+    // is GONE, because the derivation now runs on REDRIVE_LOOKBACK_DAYS (28d) — consecutive reviews
+    // overlap by half. That is fine and is not the accident it looks like: overlap was never the
+    // thing to avoid. Whether a move is real is decided by BoostV5PeriodicReview.surfaceThreshold
+    // (upstream's calibrated per-knob deadband), not by the schedule. Upstream's own automatic
+    // re-derivation runs a 28d window every 7 days — 75% overlap — for exactly this reason.
+    //
+    // 14 days is kept as the cadence because this path asks the USER to confirm: it is the rate at
+    // which being interrupted is reasonable, not a statistical quantity.
+    // (plain `val`, not `const val` — this is a class body, where const is not permitted)
+    private val PERIODIC_REVIEW_INTERVAL_DAYS = 14L
+    private val PERIODIC_REVIEW_INTERVAL_MS = PERIODIC_REVIEW_INTERVAL_DAYS * 24L * 60 * 60 * 1000
     private val TBR_GATE_MIN_READINGS = 1000                  // ~3.5 days of 5-min CGM before the % is trusted
     @Volatile private var cachedTbrBelow63Pct: Double? = null
     @Volatile private var cachedTbrBelow70Pct: Double? = null
@@ -671,7 +682,14 @@ open class OpenAPSBoostV5Plugin @Inject constructor(
         // 2026-09-03 merge: der frueher hereingereichte profileProvider entfaellt — seit
         // scheduleConfigEvaluation() laeuft das hier im Hintergrund-Thread, also darf die
         // (schwere) Sammlung direkt hier passieren, mit derselben Quelle wie maybeAutoConfigure().
-        val profile = gatherProfile(now, BoostV5AutoConfig.LOOKBACK_DAYS).profile
+        // 2026-09-03: derive from REDRIVE_LOOKBACK_DAYS (28d), NOT the 14d LOOKBACK_DAYS this used
+        // before. Upstream measured that a 14-day window is noise-dominated for exactly these knobs:
+        // two independent 14d derivations of the SAME fortnight differ by 0.69 U [0.30, 1.17] on
+        // confirmedCap. Suggestions built on it were partly resampling noise, and this path asks the
+        // USER to act on them — so it must not hand out noise. Same window upstream's automatic
+        // re-derivation uses, and the window the surfaceThreshold deadband was calibrated against.
+        // Cadence is unaffected (PERIODIC_REVIEW_INTERVAL_DAYS, still 14) — separate axis on purpose.
+        val profile = gatherProfile(now, BoostV5AutoConfig.REDRIVE_LOOKBACK_DAYS).profile
         // 2026-08-27 — covers the 4 managed BOOLEAN switches too, not just the double-valued knobs
         // (was a real gap: they were only ever decided ONCE by the one-shot AutoConfig at first V6
         // activation, never reconsidered here). Both calls share the SAME BoostV5AutoConfig.compute()

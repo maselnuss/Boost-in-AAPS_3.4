@@ -277,8 +277,17 @@ open class OpenAPSBoostPlugin @Inject constructor(
             else              -> isfResultRatio
         }
 
-        /** Outcome of the V6-override dose caps: the dose to deliver plus the reason-line breadcrumb ("" when uncapped). */
-        internal data class V6OverrideCaps(val dose: Double, val capNote: String)
+        /**
+         * Outcome of the V6-override dose caps: the dose to deliver plus the reason-line breadcrumb
+         * ("" when uncapped).
+         *
+         * [ceilingU] is the upper bound that the cap REGIME imposes this cycle, or null when no cap
+         * regime is active. Deliberately regime-based, not "did the cap bite": when v1WouldDose
+         * happens to equal v5FinalDose the note is empty, yet we are still inside the post-rescue /
+         * non-meal regime and anything added downstream must respect V1's restraint. Consumed by the
+         * ConfirmTranche release guard below — see the 2026-09-03 note at the call site. (2026-09-03)
+         */
+        internal data class V6OverrideCaps(val dose: Double, val capNote: String, val ceilingU: Double? = null)
 
         /**
          * V6-override dose caps (pure — unit-tested directly):
@@ -310,13 +319,17 @@ open class OpenAPSBoostPlugin @Inject constructor(
             v1WouldDose: Double,
             recentLowBG45Min: Double
         ): V6OverrideCaps {
+            // A cap regime is active whenever the meal-state exemption does NOT apply: either we are
+            // not in a meal state at all, or we are but the post-rescue window has suppressed the
+            // exemption. Exactly the condition under which `dose` inherits V1's would-dose.
+            val capRegimeActive = !inMealState || inPostRescueWindow
             val dose = if (inMealState && !inPostRescueWindow) v5FinalDose else minOf(v5FinalDose, v1WouldDose)
             val capNote = when {
                 dose >= v5FinalDose -> ""
                 inMealState         -> ", post-rescue capped from ${Round.roundTo(v5FinalDose, 0.001)}U to V1's ${Round.roundTo(v1WouldDose, 0.001)}U (45-min low ${Round.roundTo(recentLowBG45Min, 1.0)})"
                 else                -> ", non-meal-capped from ${Round.roundTo(v5FinalDose, 0.001)}U"
             }
-            return V6OverrideCaps(dose, capNote)
+            return V6OverrideCaps(dose, capNote, ceilingU = if (capRegimeActive) v1WouldDose else null)
         }
     }
 
@@ -1490,6 +1503,28 @@ open class OpenAPSBoostPlugin @Inject constructor(
             isTempTarget = isTempTarget
         )
 
+        // 2026-09-03 (Nutzerfrage: "hat der Floor-Vorschlag rein theoretisch schon was besser/
+        // schlechter gemacht?") — floor OUTCOME counterfactual, SHADOW ONLY, logged every cycle.
+        // BoostFloorSlewShadow's own rolling floorPct is derived from historical compressionRatio =
+        // variableSens / oapsProfileBoost.sens (see the `samples` map above, `r.oapsProfileBoost?.
+        // sens`, itself built from the UNSCALED `profile.getIsfMgdl(...)` at this file's `oapsProfile`
+        // construction below — NOT `scaledProfileSens`, which already divides by the active
+        // profile-switch %). To ask "would the floor have bound THIS cycle" the same quantity must be
+        // reproduced exactly: variableSens over the RAW (unscaled) profile ISF, not scaledProfileSens
+        // — using the wrong denominator here would silently compare against a threshold computed on a
+        // different basis, which is worse than not measuring it at all. Pure comparison, no state, no
+        // rate-of-change (that is the SLEW half, not attempted here — it needs a cycle-to-cycle delta
+        // and deserves its own careful pass rather than being rushed in alongside this).
+        val floorOutcomeNsNote: String? = if (floorSlewShadowEnabled) {
+            floorSlewSuggestionCached?.let { s ->
+                val profileSensRawNow = profile.getIsfMgdl("OpenAPSBoostPlugin")
+                if (profileSensRawNow > 0.0) {
+                    val compressionNowPct = Round.roundTo(isfResult.variableSens / profileSensRawNow * 100.0, 0.1)
+                    "floorOutcomeShadow=${compressionNowPct < s.floorPct},${compressionNowPct},${s.floorPct}; "
+                } else null
+            }
+        } else null
+
         // 4. Sensitivity ratio that drives basal / target / CR scaling in determine_basal.
         //    Two DISTINCT levers feed DetermineBasalBoost:
         //      • variable_sens (ISF, from isfResult) — the DynISF curve; always carries BG/velocity
@@ -2085,6 +2120,10 @@ open class OpenAPSBoostPlugin @Inject constructor(
                 it.reason.append(note)
                 it.consoleError?.add(note.trimEnd(' ', ';'))
             }
+            floorOutcomeNsNote?.let { note ->
+                it.reason.append(note)
+                it.consoleError?.add(note.trimEnd(' ', ';'))
+            }
 
             // Trial arm tag, every cycle (not only when the guard fires), so the analysis can
             // count exposure on days the guard never engaged. enrolled,arm,cap.
@@ -2536,20 +2575,71 @@ open class OpenAPSBoostPlugin @Inject constructor(
                 // into exactly two causes, the rolling cumulative SMB cap and the sleep gate, both
                 // of which are states in which the engine has already decided against a micro bolus.
                 // A release that cannot land is that machinery agreeing with the withhold.
+                // 2026-09-03 — POST-RESCUE / CAP-REGIME GUARD around the tranche (local addition,
+                // prerequisite for switching ApsBoostV5ConfirmTranche on at all).
+                //
+                // The upstream block runs AFTER applyV6OverrideCaps and adds the held remainder back
+                // on top via `before + onCycle(...)`. That remainder was sized at CONFIRM time; if a
+                // low lands between the confirm and the release, the post-rescue window opens, `caps`
+                // correctly pulls the cycle down to V1's hypo-restrained dose — and the release then
+                // puts the withheld insulin straight back, defeating the cap that exists precisely
+                // for this situation (2026-07-03 nadir-40 incident).
+                //
+                // This is NOT hypothetical: the release rule's BG_NOW coefficient is NEGATIVE
+                // (-0.018302), so a LOWER current BG RAISES the release probability. Evaluated with
+                // the shipped coefficients at threshold 0.48, bgAtConfirm 120, maxBgSince 130:
+                //   bg 150 rising  +6 -> p 0.923 (release, intended)
+                //   bg  70 falling -5 -> p 0.665 (release)
+                //   bg  55 falling -8 -> p 0.690 (release)
+                // i.e. the rule releases INTO a hypo. The controller was fitted on confirm episodes,
+                // where a post-hypo window is out of distribution — it is not wrong, it was simply
+                // never asked this question.
+                //
+                // Two-part guard:
+                //  1. Inside the post-rescue window the hold is DROPPED, not released. The class KDoc
+                //     is explicit that "a withheld remainder that is never released is insulin not
+                //     given" and that the mechanism can only ever deliver less — dropping therefore
+                //     stays inside the controller's own contract. Dropping beats clamping here
+                //     because it keeps the bookkeeping honest: no log line claims a release that did
+                //     not happen, and no stale hold survives to fire after the window closes.
+                //  2. Outside it, any cap regime still active (non-meal cap) clamps the post-tranche
+                //     dose to caps.ceilingU, so no release can out-dose V1 there either.
+                //
+                // Deliberate, so it is not later read as an oversight: inside the window a CONFIRMED
+                // cycle does NOT go through onConfirm() either — the tranche is simply inert there and
+                // the cycle delivers exactly caps.dose. Splitting it would mean handing out half of a
+                // dose V1's tier guard had ALREADY restrained for the hypo, an extra reduction no
+                // backtest supports, and it would create a fresh hold inside the very window we are
+                // trying to keep clear. Inert-in-window is never more than the tranche-off baseline.
                 if (preferences.getBoostDosing(BooleanKey.ApsBoostV5ConfirmTranche)) {
                     confirmTranche.immediateFraction = preferences.getBoostDosing(DoubleKey.ApsBoostV5TrancheFraction)
                     confirmTranche.releaseThreshold = preferences.getBoostDosing(DoubleKey.ApsBoostV5TrancheThreshold)
                     val before = overrideDose
-                    overrideDose = if (v5decision.mealHypothesis == MealHypothesis.CONFIRMED) {
-                        confirmTranche.onConfirm(now, glucoseStatus.glucose, before)
+                    var trancheGuardNote = ""
+                    if (inPostRescueWindow) {
+                        val droppedU = confirmTranche.heldU()
+                        confirmTranche.reset()
+                        if (droppedU > 0.0) trancheGuardNote = " [post-rescue: hold ${Round.roundTo(droppedU, 0.001)}U dropped]"
                     } else {
-                        before + confirmTranche.onCycle(now, glucoseStatus.glucose)
+                        overrideDose = if (v5decision.mealHypothesis == MealHypothesis.CONFIRMED) {
+                            confirmTranche.onConfirm(now, glucoseStatus.glucose, before)
+                        } else {
+                            before + confirmTranche.onCycle(now, glucoseStatus.glucose)
+                        }
+                        val ceiling = caps.ceilingU
+                        if (ceiling != null && overrideDose > ceiling) {
+                            trancheGuardNote = " [cap-regime: ${Round.roundTo(overrideDose, 0.001)}U clamped to V1's ${Round.roundTo(ceiling, 0.001)}U]"
+                            overrideDose = ceiling
+                        }
                     }
                     it.reason.append("tranche=${Round.roundTo(before, 0.001)},"
                         + "${Round.roundTo(overrideDose, 0.001)},"
                         + "${Round.roundTo(confirmTranche.heldU(), 0.001)},"
                         + "${confirmTranche.probeProbability(glucoseStatus.glucose)?.let { p -> Round.roundTo(p, 0.001) } ?: "-"},"
-                        + "${v5decision.mealHypothesis}; ")
+                        // trancheGuardNote is an optional bracketed suffix AFTER the five
+                        // comma-separated fields — same shape as capNote on the V6-ACTIVE line, so
+                        // the fixed field layout stays parseable and the guard is still visible.
+                        + "${v5decision.mealHypothesis}$trancheGuardNote; ")
                 }
                 it.units = overrideDose
                 it.reason.append("V6-ACTIVE drove SMB ${Round.roundTo(overrideDose, 0.001)}U (base would=${Round.roundTo(v1WouldDose, 0.001)}U, state=${v5decision.mealHypothesis}${caps.capNote}); ")

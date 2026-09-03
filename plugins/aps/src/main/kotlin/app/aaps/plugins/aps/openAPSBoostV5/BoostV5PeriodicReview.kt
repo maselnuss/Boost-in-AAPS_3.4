@@ -30,8 +30,36 @@ object BoostV5PeriodicReview {
      * Minimum absolute change before a knob is worth surfacing. All suggested values are already
      * rounded to 1 or 2 decimal places by [BoostV5AutoConfig.compute], so this only filters
      * float round-trip noise (AdaptiveDoublePreference persists as Float), not genuine differences.
+     *
+     * FALLBACK ONLY since 2026-09-03 — see [surfaceThreshold]. It was never a statistical filter,
+     * and using it as one was the bug: on its own it surfaces every difference above float noise,
+     * including differences that are pure resampling noise of the derivation itself.
      */
     private const val MIN_ABS_DELTA = 0.01
+
+    /**
+     * How big a difference must be before this review bothers the user with it (2026-09-03).
+     *
+     * Reuses upstream's [BoostV5AutoConfigApply.REDRIVE_DEADBAND] — the per-knob band its automatic
+     * re-derivation requires before it will WRITE. The role here is advisory rather than a write
+     * gate, but the underlying question is identical: "is this move bigger than the measurement
+     * error?" Its values are calibrated for exactly that (confirmedCap 0.47 U, committedCap 0.07 U).
+     *
+     * WHY this had to change: the derivation's own noise dwarfed the old 0.01 threshold. Two
+     * independent derivations of the SAME fortnight differ by 0.69 U [0.30, 1.17] on confirmedCap
+     * (upstream's CADENCE_GRID measurement, see BoostV5AutoConfig's redrive KDoc). Surfacing every
+     * difference above 0.01 U against a ±0.69 U noise floor meant essentially every confirmedCap
+     * item ever shown was noise — the review cried wolf, so its signal was worthless.
+     *
+     * Pairs with the switch to REDRIVE_LOOKBACK_DAYS in the caller: the band was fitted alongside
+     * the 28-day window, so window and threshold belong together and must be changed together.
+     *
+     * Knobs upstream defines no band for (e.g. FloorSlewAggressiveness) keep [MIN_ABS_DELTA] —
+     * upstream's own redrive does the same via its `?: 0.0` fallback, so this stays no stricter
+     * than before for them.
+     */
+    private fun surfaceThreshold(key: DoubleKey): Double =
+        BoostV5AutoConfigApply.REDRIVE_DEADBAND[key] ?: MIN_ABS_DELTA
 
     data class ReviewItem(
         val key: DoubleKey,
@@ -63,7 +91,7 @@ object BoostV5PeriodicReview {
         return candidateKnobs(suggestion).mapNotNull { (key, suggested) ->
             val stored = currentValue(key)
             val current = stored ?: key.defaultValue
-            if (abs(current - suggested) < MIN_ABS_DELTA) return@mapNotNull null
+            if (abs(current - suggested) < surfaceThreshold(key)) return@mapNotNull null
             ReviewItem(
                 key = key,
                 currentValue = current,

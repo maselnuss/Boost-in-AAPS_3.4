@@ -729,6 +729,10 @@ class BoostOverviewV2Fragment : DaggerFragment(), View.OnClickListener {
             // 2026-08-30/31: added when built, missed adding here at the time -- both are read-only
             // shadow tags (never affect dosing), belong in this section like the others above.
             "committedCapShadow=", "reboundGuardShadow=",
+            // 2026-09-03: floor OUTCOME counterfactual (floor/slew Konzept 1's "would this cycle's
+            // compression have tripped the floor" companion) -- added at build time this time, not
+            // as a later catch-up.
+            "floorOutcomeShadow=",
         )
 
         /** Matches the engine's own section dividers, e.g. "── Glucose ─────" (built with U+2500
