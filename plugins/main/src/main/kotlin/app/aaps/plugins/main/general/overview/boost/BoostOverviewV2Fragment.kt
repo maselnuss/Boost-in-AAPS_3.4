@@ -733,6 +733,9 @@ class BoostOverviewV2Fragment : DaggerFragment(), View.OnClickListener {
             // compression have tripped the floor" companion) -- added at build time this time, not
             // as a later catch-up.
             "floorOutcomeShadow=",
+            // 2026-09-03: tranche-threshold derivation (BoostTrancheThresholdShadow) -- derives a
+            // SETTING rather than a dosing decision, but is shadow in the same sense (logs only).
+            "trancheThresholdShadow=",
         )
 
         /** Matches the engine's own section dividers, e.g. "── Glucose ─────" (built with U+2500

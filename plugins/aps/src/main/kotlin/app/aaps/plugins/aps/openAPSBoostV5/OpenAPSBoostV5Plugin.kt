@@ -40,6 +40,7 @@ import app.aaps.core.interfaces.notifications.Notification
 import app.aaps.core.interfaces.stats.TddCalculator
 import app.aaps.core.interfaces.ui.UiInteraction
 import app.aaps.core.interfaces.utils.DateUtil
+import app.aaps.core.interfaces.utils.Round
 import app.aaps.core.keys.BooleanComposedKey
 import app.aaps.core.keys.BooleanKey
 import app.aaps.core.keys.DoubleKey
@@ -226,6 +227,13 @@ open class OpenAPSBoostV5Plugin @Inject constructor(
                 // off the dose path) since the 2026-09-03 upstream merge moved config work here.
                 runCatching { maybePeriodicReview(dateUtil.now()) }
                     .onFailure { aapsLogger.error(LTag.APS, "BoostV5 periodic review failed (non-fatal)", it) }
+                // Tranche-threshold shadow (2026-09-03, user request "die Berechnung direkt
+                // mitlaufen lassen") — replays the release rule over recent confirm episodes and
+                // logs what releaseThreshold SHOULD be. Writes nothing, never touches dosing. Runs
+                // here rather than in runEngine() because it sweeps APS results + BG history, which
+                // must not sit on the dose path. See BoostTrancheThresholdShadow.kt.
+                runCatching { maybeTrancheThresholdShadow(dateUtil.now()) }
+                    .onFailure { aapsLogger.error(LTag.APS, "BoostV5 tranche-threshold shadow failed (non-fatal)", it) }
                 // maybeRedrive() — upstream's AUTOMATIC re-derivation. DELIBERATELY DISABLED
                 // (2026-09-03 merge, user decision "Variante C"): it writes the very same managed
                 // knobs that Konzept 7 above is presenting for confirmation, so running both lets
@@ -291,6 +299,18 @@ open class OpenAPSBoostV5Plugin @Inject constructor(
     //
     // 14 days is kept as the cadence because this path asks the USER to confirm: it is the rate at
     // which being interrupted is reasonable, not a statistical quantity.
+    // Tranche-threshold shadow (2026-09-03). Own window, deliberately NOT reusing the review
+    // cadence: this is a rolling estimate that wants as many episodes as it can get, not a
+    // user-facing interruption. 28 days matches the redrive lookback (same "14 days is
+    // noise-dominated" reasoning), 6h recompute is far more often than the answer can move but
+    // keeps it fresh after a build without waiting a day.
+    private val TRANCHE_SHADOW_LOOKBACK_MS = 28L * 24 * 60 * 60 * 1000
+    private val TRANCHE_SHADOW_INTERVAL_MS = 6L * 60 * 60 * 1000
+    /** Consecutive CONFIRMED cycles closer than this belong to the same meal, not a new episode. */
+    private val EPISODE_GAP_MS = 15L * 60 * 1000
+    /** Outcome window after a confirm — same 3h as confirmed_cap_shadow's bg_outcome_180min. */
+    private val OUTCOME_WINDOW_MS = 180L * 60 * 1000
+
     // (plain `val`, not `const val` — this is a class body, where const is not permitted)
     private val PERIODIC_REVIEW_INTERVAL_DAYS = 14L
     private val PERIODIC_REVIEW_INTERVAL_MS = PERIODIC_REVIEW_INTERVAL_DAYS * 24L * 60 * 60 * 1000
@@ -303,6 +323,11 @@ open class OpenAPSBoostV5Plugin @Inject constructor(
     // when it surfaces a fresh review THIS cycle; consumed+cleared by runShadow() the moment the
     // live rT becomes available, so the note reaches NS/consoleError exactly once.
     @Volatile private var pendingPeriodicReviewNsNote: String? = null
+
+    // Tranche-threshold shadow (2026-09-03) — same hand-off pattern as the line above: computed in
+    // the background executor, consumed once by runShadow() when the live rT exists.
+    @Volatile private var pendingTrancheThresholdNsNote: String? = null
+    @Volatile private var lastTrancheThresholdComputeMs: Long = 0L
 
     /** Throttled trailing-14d time-below-63 AND -70 mg/dL, then the fail-closed floor hypo-gate. */
     internal fun composedFloorTbrAllowed(now: Long): Boolean {
@@ -675,6 +700,116 @@ open class OpenAPSBoostV5Plugin @Inject constructor(
      * pre-checked — unchecking is opt-out, not opt-in) plus apply/discard. Nothing is written until
      * the user confirms in the dialog.
      */
+    /**
+     * Tranche-threshold shadow (2026-09-03) — replays [ConfirmTrancheController]'s release rule over
+     * the user's own recent confirm episodes and logs the threshold that would have decided best.
+     * SHADOW ONLY: writes no preference, touches no dose, is not consulted by auto-config.
+     *
+     * The replay uses [ConfirmTrancheController.probabilityFor] — the live path's own arithmetic,
+     * not a copy — and the real per-cycle BG series, so `slope` is the actual previous-cycle delta
+     * rather than the five-minute approximation the offline Nightscout script has to make.
+     *
+     * Recomputed at most every [TRANCHE_SHADOW_INTERVAL_MS]; the sweep is cheap but the two history
+     * queries are not, and the answer moves on the scale of days.
+     */
+    private fun maybeTrancheThresholdShadow(now: Long) {
+        if (!preferences.getBoostDosing(BooleanKey.ApsBoostTrancheThresholdShadowEnabled)) return
+        if (now - lastTrancheThresholdComputeMs < TRANCHE_SHADOW_INTERVAL_MS) return
+        lastTrancheThresholdComputeMs = now
+
+        val since = now - TRANCHE_SHADOW_LOOKBACK_MS
+        val results = persistenceLayer.getApsResults(since, now)
+        // ascending = true: the episode walk below relies on chronological order.
+        val bgs = persistenceLayer.getBgReadingsDataFromTimeToTime(since, now, true)
+        if (results.isEmpty() || bgs.size < 2) return
+
+        val bgTimes = bgs.map { it.timestamp }
+        val bgValues = bgs.map { it.value }
+
+        /** Nearest BG to [ms] within [tolMs], else null — the series has gaps (sensor changes). */
+        fun bgAt(ms: Long, tolMs: Long = 8 * 60_000L): Double? {
+            var i = bgTimes.binarySearch(ms)
+            if (i < 0) i = -i - 1
+            var best: Pair<Long, Double>? = null
+            for (j in intArrayOf(i - 1, i)) {
+                if (j in bgTimes.indices) {
+                    val d = kotlin.math.abs(bgTimes[j] - ms)
+                    if (d <= tolMs && (best == null || d < best!!.first)) best = d to bgValues[j]
+                }
+            }
+            return best?.second
+        }
+
+        /** (min, max) over [from, to], or null when the window holds no readings. */
+        fun range(from: Long, to: Long): Pair<Double, Double>? {
+            var lo = bgTimes.binarySearch(from); if (lo < 0) lo = -lo - 1
+            var hi = bgTimes.binarySearch(to); if (hi < 0) hi = -hi - 1
+            if (lo >= hi) return null
+            var mn = Double.MAX_VALUE
+            var mx = -Double.MAX_VALUE
+            for (k in lo until hi) {
+                if (bgValues[k] < mn) mn = bgValues[k]
+                if (bgValues[k] > mx) mx = bgValues[k]
+            }
+            return mn to mx
+        }
+
+        // The meal state must be parsed out of `reason`: APSResult (the PERSISTED interface) carries
+        // date/reason/variableSens/oapsProfileBoost, but NOT the boostV5_* fields — those live on RT,
+        // the serialisable result class, and do not survive into the stored APSResult. Same approach
+        // and same tag the overshoot-guard sweep already uses (OpenAPSBoostPlugin, accelMealStateRegex):
+        // accelMeal= is written every cycle, and its last field is the meal-hypothesis state.
+        val stateRegex = Regex("""accelMeal=-?\d+,-?\d+\.?\d*,-?\d+\.?\d*,-?\d+\.?\d*,-?\d+\.?\d*,(\w+)""")
+        // One episode per CONFIRMED run: consecutive CONFIRMED cycles belong to the same meal, so
+        // only the first is taken (CONFIRMED_TO_COMMITTED_AGE = 0 makes these runs short anyway).
+        val confirms = mutableListOf<Long>()
+        for (r in results) {
+            val state = stateRegex.find(r.reason)?.groupValues?.getOrNull(1) ?: continue
+            if (state != "CONFIRMED") continue
+            if (confirms.isNotEmpty() && r.date - confirms.last() <= EPISODE_GAP_MS) continue
+            confirms.add(r.date)
+        }
+
+        val releaseOffsetMs =
+            ((ConfirmTrancheController.HOLD_MINUTES_DEFAULT - ConfirmTrancheController.HOLD_SLACK_MIN) * 60_000).toLong()
+        val episodes = confirms.mapNotNull { confirmMs ->
+            val bgConfirm = bgAt(confirmMs) ?: return@mapNotNull null
+            val relMs = confirmMs + releaseOffsetMs
+            val bgRelease = bgAt(relMs) ?: return@mapNotNull null
+            // slope = delta to the PREVIOUS cycle's reading, matching the controller's own lastBg.
+            val bgPrev = bgAt(relMs - 5 * 60_000L)
+            val slope = if (bgPrev != null) bgRelease - bgPrev else 0.0
+            val maxSince = maxOf(range(confirmMs, relMs)?.second ?: bgConfirm, bgRelease)
+            val outcome = range(confirmMs, confirmMs + OUTCOME_WINDOW_MS) ?: return@mapNotNull null
+            BoostTrancheThresholdShadow.Episode(
+                atMs = confirmMs,
+                pRelease = ConfirmTrancheController.probabilityFor(bgConfirm, bgRelease, maxSince, slope),
+                peakAfter = outcome.second,
+                troughAfter = outcome.first,
+            )
+        }
+
+        val current = preferences.getBoostDosing(DoubleKey.ApsBoostV5TrancheThreshold)
+        // Non-null only while the tranche is actually acting — see the feedback-loop caveat in
+        // BoostTrancheThresholdShadow's KDoc; the reader must know whether these outcomes were
+        // produced by a system that was already withholding.
+        val inEffect = if (preferences.getBoostDosing(BooleanKey.ApsBoostV5ConfirmTranche)) current else null
+        val s = BoostTrancheThresholdShadow.computeSuggestion(episodes, current, inEffect)
+        if (s == null) {
+            aapsLogger.debug(LTag.APS, "Tranche-threshold shadow: not enough unambiguous episodes yet (${episodes.size} raw)")
+            return
+        }
+        pendingTrancheThresholdNsNote =
+            "trancheThresholdShadow=${Round.roundTo(s.bestThreshold, 0.01)}," +
+                "${Round.roundTo(current, 0.01)},${s.episodes},${s.correctAtBest},${s.correctAtCurrent}," +
+                "${s.releaseWasRight},${s.holdWasRight},${inEffect != null}; "
+        aapsLogger.info(
+            LTag.APS,
+            "Tranche-threshold shadow: best=${s.bestThreshold} (current=$current), " +
+                "${s.correctAtBest}/${s.episodes} correct vs ${s.correctAtCurrent}/${s.episodes}, live=${inEffect != null}"
+        )
+    }
+
     private fun maybePeriodicReview(now: Long) {
         val lastReview = preferences.get(LongNonKey.ApsBoostV5PeriodicReviewLastMs)
         if (lastReview != 0L && now - lastReview < PERIODIC_REVIEW_INTERVAL_MS) return
@@ -1240,6 +1375,12 @@ open class OpenAPSBoostV5Plugin @Inject constructor(
                 rT.reason.append(note)
                 rT.consoleError?.add(note.trimEnd(' ', ';'))
                 pendingPeriodicReviewNsNote = null
+            }
+            // Tranche-threshold shadow (2026-09-03) — same once-only hand-off as the review note.
+            pendingTrancheThresholdNsNote?.let { note ->
+                rT.reason.append(note)
+                rT.consoleError?.add(note.trimEnd(' ', ';'))
+                pendingTrancheThresholdNsNote = null
             }
             val priorState = stateStore.load()
             val inputs = buildInputs(rT, glucoseStatus, iobArray, oapsProfile, pumpBolusStep, activeMode, microBolusAllowed, flatBGsDetected, asleep, postRescueWindow)

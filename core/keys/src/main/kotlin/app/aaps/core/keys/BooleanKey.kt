@@ -117,6 +117,12 @@ enum class BooleanKey(
     // there 2 consecutive RAW BG readings <60 mg/dl in the last 75 min (own window, independent of
     // the existing 45-min post-rescue cap)? SHADOW ONLY, logs only, never applied.
     ApsBoostReboundGuardShadowEnabled("boost_rebound_guard_shadow_enabled", false, defaultedBySM = true),
+    // Tranche-threshold shadow (2026-09-03) — replays ConfirmTranche's release rule over recent
+    // confirm episodes and logs which releaseThreshold would have decided best for THIS user.
+    // Pure computation, never writes the preference, never touches dosing. Independent of whether
+    // the tranche itself is switched on (it just changes how the result must be read — see
+    // BoostTrancheThresholdShadow's feedback-loop caveat).
+    ApsBoostTrancheThresholdShadowEnabled("boost_tranche_threshold_shadow_enabled", false, defaultedBySM = true),
     ApsBoostBypassVersionCheck("boost_bypass_version_check", true, defaultedBySM = true),
     // Boost V5 active-dosing alpha (2026-06-11) — when ON, V5's observe-confirm-commit SMB REPLACES
     // V1's SMB on cycles V1 permits one. V1 still owns basal + all safety gates. Toggle OFF = instant revert.

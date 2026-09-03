@@ -3765,6 +3765,10 @@ open class OpenAPSBoostPlugin @Inject constructor(
             addPreference(AdaptiveSwitchPreference(ctx = context, booleanKey = BooleanKey.ApsBoostOvershootGuardShadowEnabled, summary = R.string.boost_overshoot_guard_shadow_enabled_summary, title = R.string.boost_overshoot_guard_shadow_enabled_title))
             // Konzept 2 (2026-08-31) — see reboundGuardShadow= call site.
             addPreference(AdaptiveSwitchPreference(ctx = context, booleanKey = BooleanKey.ApsBoostReboundGuardShadowEnabled, summary = R.string.boost_rebound_guard_shadow_enabled_summary, title = R.string.boost_rebound_guard_shadow_enabled_title))
+            // Tranche-threshold derivation (2026-09-03) — see BoostTrancheThresholdShadow.kt.
+            // Unlike the others this one derives a SETTING rather than a dosing decision, but it is
+            // shadow in exactly the same sense: it computes and logs, and writes nothing.
+            addPreference(AdaptiveSwitchPreference(ctx = context, booleanKey = BooleanKey.ApsBoostTrancheThresholdShadowEnabled, summary = R.string.boost_tranche_threshold_shadow_enabled_summary, title = R.string.boost_tranche_threshold_shadow_enabled_title))
         }
 }
 

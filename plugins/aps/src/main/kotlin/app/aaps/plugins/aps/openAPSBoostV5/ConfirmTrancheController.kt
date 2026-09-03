@@ -45,7 +45,13 @@ class ConfirmTrancheController(
 ) {
 
     // Fitted 2026-08-27, eleven participants, held out by participant. See the class KDoc.
-    private companion object {
+    //
+    // 2026-09-03: was `private companion object`, widened to `internal` so
+    // BoostTrancheThresholdShadow can replay [probabilityFor] over history instead of keeping its
+    // own copy of the coefficients. Single source of truth on purpose — a second hand-maintained
+    // copy is exactly how the Shadow Concepts screen drifted out of sync before (see
+    // buildShadowConceptsScreen's KDoc). Nothing else about this class changed.
+    internal companion object {
         const val B0 = 2.48631
         const val BG_CONFIRM = -0.014480
         const val RISE_SINCE = -0.003822
@@ -53,7 +59,27 @@ class ConfirmTrancheController(
         const val SLOPE_NOW = 0.072499
         const val BG_NOW = -0.018302
         const val HOLD_SLACK_MIN = 2.5
+
+        /**
+         * The default [holdMinutes] as a constant, so a replay can reconstruct WHEN the release
+         * cycle falls without instantiating a controller. Kept in step with the constructor default
+         * above — if that ever becomes user-tunable, this must follow or the replay drifts.
+         */
+        const val HOLD_MINUTES_DEFAULT = 10.0
+
         fun sigmoid(z: Double) = 1.0 / (1.0 + exp(-z))
+
+        /**
+         * The release rule's probability, as a pure function of the four inputs — no [Pending]
+         * state, so history can be replayed through the exact same arithmetic the live path uses.
+         * [onCycle] and [probeProbability] both express this same z; this is that expression
+         * extracted, not a reimplementation.
+         */
+        fun probabilityFor(bgAtConfirm: Double, bgNow: Double, maxBgSince: Double, slope: Double): Double =
+            sigmoid(
+                B0 + BG_CONFIRM * bgAtConfirm + RISE_SINCE * (bgNow - bgAtConfirm) +
+                    MAX_RISE_SINCE * (maxBgSince - bgAtConfirm) + SLOPE_NOW * slope + BG_NOW * bgNow
+            )
     }
 
     data class Pending(
