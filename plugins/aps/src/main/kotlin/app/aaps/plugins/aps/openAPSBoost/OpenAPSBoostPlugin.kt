@@ -3498,7 +3498,17 @@ open class OpenAPSBoostPlugin @Inject constructor(
      * place and stay reachable under whichever Boost plugin is the active APS. Contains NO V5/V6
      * controls (those belong to the V5 plugin).
      */
-    fun addBoostEngineCategories(preferenceManager: PreferenceManager, category: PreferenceGroup, context: Context, includeEngineEssentials: Boolean = true) {
+    fun addBoostEngineCategories(
+        preferenceManager: PreferenceManager,
+        category: PreferenceGroup,
+        context: Context,
+        includeEngineEssentials: Boolean = true,
+        // 2026-09-03: default true keeps OpenAPSBoostPlugin's own (parameterless) call site at
+        // line ~3490 byte-for-byte unchanged — its Shadow Concepts stays nested under its own
+        // "Advanced Settings" exactly as before. Only OpenAPSBoostV5Plugin passes false, since it
+        // attaches its own copy one level shallower right after this call returns.
+        includeShadowConcepts: Boolean = true,
+    ) {
         category.apply {
             // ── 1. Default AAPS Settings ────────────────────────────────
             addPreference(preferenceManager.createPreferenceScreen(context).apply {
@@ -3706,14 +3716,25 @@ open class OpenAPSBoostPlugin @Inject constructor(
                 )
 
                 // ── 7a. Shadow Concepts — see buildShadowConceptsScreen() below. Nested here as a
-                //     child of "7. Advanced Settings" — the placement OpenAPSBoostPlugin's OWN
-                //     screen uses (2026-08-28 agreed placement). OpenAPSBoostV5Plugin does NOT call
-                //     addBoostEngineCategories for this part — it calls buildShadowConceptsScreen()
-                //     directly and attaches the result one level shallower instead (2026-09-03,
-                //     user-requested placement — directly on its own "Advanced" screen, above
-                //     Restore-backup). Single shared builder, two different attachment points —
-                //     no risk of the two ever drifting out of sync with each other again.
-                addPreference(buildShadowConceptsScreen(preferenceManager, context))
+                //     child of "7. Advanced Settings" — OpenAPSBoostPlugin's OWN placement
+                //     (2026-08-28 agreed placement).
+                //
+                //     2026-09-03 BUGFIX (user report, screenshot evidence — "es steht schon unter
+                //     Boost Advanced Settings, wieso ist es AUCH noch tiefer sichtbar?!"): this line
+                //     was previously unconditional. `includeEngineEssentials = false` only gates
+                //     individual LEAF preferences elsewhere in this function (MaxBasal/MaxIob/Night
+                //     Mode/SMB/UAM) — it never covered this block, so OpenAPSBoostV5Plugin's call
+                //     below (includeEngineEssentials = false) still added THIS nested copy on top of
+                //     its own shallower one (advanced.addPreference(...buildShadowConceptsScreen...)
+                //     in OpenAPSBoostV5Plugin.kt) — the exact double-attachment now visible on device
+                //     (build 3.4.2.6/3b8a). The comment here previously CLAIMED "V5Plugin does NOT
+                //     call addBoostEngineCategories for this part", which was simply wrong — it does,
+                //     unconditionally, every time. Fixed with its own flag rather than overloading
+                //     includeEngineEssentials, since the two are conceptually different switches (one
+                //     is "V5 replaces these dosing knobs", this one is "V5 places this screen
+                //     elsewhere") that happened to always move together so far — no reason to assume
+                //     they always will.
+                if (includeShadowConcepts) addPreference(buildShadowConceptsScreen(preferenceManager, context))
             })
         }
     }

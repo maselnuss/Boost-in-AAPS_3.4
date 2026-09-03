@@ -1614,9 +1614,11 @@ open class OpenAPSBoostV5Plugin @Inject constructor(
         }
         // Shared engine settings nested under Advanced. includeEngineEssentials = false: the
         // 6 essentials above are NOT repeated inside the engine sub-screens (no duplicate keys).
-        // This call's own §7a nests "Shadow Concepts" inside its "Advanced Settings" sub-screen —
-        // that's the depth OpenAPSBoostPlugin's OWN screen uses, not what V5 wants (see below).
-        openAPSBoostEngine.get().addBoostEngineCategories(preferenceManager, advanced, context, includeEngineEssentials = false)
+        // 2026-09-03 BUGFIX (user report, screenshot evidence): includeShadowConcepts = false added
+        // here — without it, addBoostEngineCategories' §7a still nests a SECOND Shadow Concepts copy
+        // inside "Advanced Settings" below, on top of the shallow one this file attaches directly to
+        // `advanced` two lines down. See addBoostEngineCategories' KDoc/comment for the full story.
+        openAPSBoostEngine.get().addBoostEngineCategories(preferenceManager, advanced, context, includeEngineEssentials = false, includeShadowConcepts = false)
         // Shadow Concepts (2026-08-28, user request; re-placement corrected 2026-09-03) — SAME
         // shared builder as OpenAPSBoostPlugin's own copy (buildShadowConceptsScreen — single
         // source of truth for the toggle list, so the two placements can never drift out of sync
