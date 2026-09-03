@@ -93,6 +93,12 @@ class V5StateStore(private val preferences: Preferences, private val aapsLogger:
                 MealHypothesisState(
                     state = MealHypothesis.valueOf(shadowJson.getString("mealHypothesis")),
                     ageCycles = shadowJson.getInt("mealHypothesisAge"),
+                    // 2026-09-03 merge: same wall-clock age anchor the live state above persists.
+                    // Without it the shadow reloads with lastAgeMs=0 every cycle, which step()
+                    // reads as "tick immediately" — the shadow would then advance its age on every
+                    // cycle while the live track advances only every AGE_TICK_MS, so the two would
+                    // differ in more than just aggressiveEarlyConfirm. Absent in older blobs -> 0.
+                    lastAgeMs = shadowJson.optLong("mealHypothesisLastAgeMs", 0L),
                     maxScoreInObserving = shadowJson.optDouble("maxScoreInObserving", 0.0),
                     maxEventualBgOffsetInObserving = shadowJson.optDouble("maxEventualBgOffsetInObserving", 0.0),
                     committedInSession = shadowJson.optBoolean("committedInSession", false),
@@ -146,6 +152,7 @@ class V5StateStore(private val preferences: Preferences, private val aapsLogger:
                 JSONObject()
                     .put("mealHypothesis", state.aggressiveConfirmShadowHypothesis.state.name)
                     .put("mealHypothesisAge", state.aggressiveConfirmShadowHypothesis.ageCycles)
+                    .put("mealHypothesisLastAgeMs", state.aggressiveConfirmShadowHypothesis.lastAgeMs)
                     .put("maxScoreInObserving", state.aggressiveConfirmShadowHypothesis.maxScoreInObserving)
                     .put("maxEventualBgOffsetInObserving", state.aggressiveConfirmShadowHypothesis.maxEventualBgOffsetInObserving)
                     .put("committedInSession", state.aggressiveConfirmShadowHypothesis.committedInSession)

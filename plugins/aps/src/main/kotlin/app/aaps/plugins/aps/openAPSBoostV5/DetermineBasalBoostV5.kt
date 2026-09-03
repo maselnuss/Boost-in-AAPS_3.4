@@ -412,6 +412,12 @@ class DetermineBasalBoostV5 @Inject constructor() {
         )
         val aggressiveConfirmShadowState = step(
             current = shadowResetState,
+            // 2026-09-03 merge: MUST be passed here too. Upstream's wall-clock age tick treats
+            // nowMs<=0 as "tick on every call" (legacy). Omitting it would make the shadow track
+            // advance its age every cycle while the live track above advances it only every
+            // AGE_TICK_MS — so the two would differ in TWO things instead of only in
+            // aggressiveEarlyConfirm, which is exactly what this shadow exists to isolate.
+            nowMs = inputs.nowMs,
             score = scoreResult.score,
             eventualBg = inputs.eventualBg,
             targetBg = inputs.targetBg,
