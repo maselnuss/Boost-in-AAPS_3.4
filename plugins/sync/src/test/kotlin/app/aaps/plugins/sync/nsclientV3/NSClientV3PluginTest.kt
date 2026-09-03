@@ -36,6 +36,7 @@ import app.aaps.core.nssdk.localmodel.treatment.CreateUpdateResponse
 import app.aaps.core.nssdk.remotemodel.LastModified
 import app.aaps.plugins.sync.nsShared.StoreDataForDbImpl
 import app.aaps.plugins.sync.nsclient.ReceiverDelegate
+import app.aaps.plugins.sync.nsclientV3.keys.NsclientLongKey
 import app.aaps.plugins.sync.nsclientV3.keys.NsclientStringKey
 import app.aaps.plugins.sync.nsclientV3.services.NSClientV3Service
 import app.aaps.shared.tests.TestBaseWithProfile
@@ -547,6 +548,55 @@ internal class NSClientV3PluginTest : TestBaseWithProfile() {
         // 2. Verify that the empty state was written to preferences to make the reset persistent.
         verify(preferences).put(NsclientStringKey.V3LastModified, expectedEmptyLastModifiedJson)
         verify(dataSyncSelectorV3).resetToNextFullSync()
+    }
+
+    // ── bounded history backfill (2026-07-30) ─────────────────────────────────────────────────────
+    // Download-only, time-bounded sibling of resetToFullSync, used by Boost to close an install-time
+    // history gap (a cross-fork migration onto a fresh database) without importing 100 days.
+
+    @Test
+    fun `firstLoadFloor is the 100 day ceiling until a bounded backfill raises it`() {
+        val now = 1_785_000_000_000L
+        whenever(dateUtil.now()).thenReturn(now)
+
+        whenever(preferences.get(NsclientLongKey.HistoryBackfillFrom)).thenReturn(0L)
+        assertThat(sut.firstLoadFloor()).isEqualTo(now - sut.maxAge)
+
+        val fourteenDaysAgo = now - T.days(14).msecs()
+        whenever(preferences.get(NsclientLongKey.HistoryBackfillFrom)).thenReturn(fourteenDaysAgo)
+        assertThat(sut.firstLoadFloor()).isEqualTo(fourteenDaysAgo)
+
+        // A request can only ever NARROW the window: the floor is a max, so a bound older than the
+        // client's own 100-day ceiling is ignored rather than widening the fetch.
+        whenever(preferences.get(NsclientLongKey.HistoryBackfillFrom)).thenReturn(now - T.days(500).msecs())
+        assertThat(sut.firstLoadFloor()).isEqualTo(now - sut.maxAge)
+    }
+
+    @Test
+    fun `resetToFullSync drops a stale backfill floor so a manual full sync is not clamped`() {
+        sut.resetToFullSync()
+        verify(preferences).put(NsclientLongKey.HistoryBackfillFrom, 0L)
+    }
+
+    @Test
+    fun `endFullSync clears the backfill floor once the whole loader chain has completed`() {
+        sut.endFullSync()
+        assertThat(sut.doingFullSync).isFalse()
+        verify(preferences).put(NsclientLongKey.HistoryBackfillFrom, 0L)
+    }
+
+    @Test
+    fun `requestHistoryBackfill declines - and mutates nothing - when the plugin is not running`() {
+        // handler is only created in onStart(), so this stands in for "NSClient is not actually up".
+        whenever(preferences.get(app.aaps.core.keys.StringKey.NsClientUrl)).thenReturn("")
+        sut.lastLoadedSrvModified = LastModified(LastModified.Collections().apply { entries = 111L; treatments = 222L })
+
+        assertThat(sut.requestHistoryBackfill(1_785_000_000_000L - T.days(14).msecs())).isFalse()
+
+        // Cursors untouched: a declined request must not leave the client half-rewound.
+        assertThat(sut.lastLoadedSrvModified.collections.entries).isEqualTo(111L)
+        assertThat(sut.lastLoadedSrvModified.collections.treatments).isEqualTo(222L)
+        assertThat(sut.fullSyncRequested).isFalse()
     }
 
     @Test

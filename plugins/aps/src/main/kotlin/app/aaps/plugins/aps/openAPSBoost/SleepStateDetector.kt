@@ -90,7 +90,21 @@ object SleepStateDetector {
      * Consecutive evaluate() cycles with avgHr above the wake floor required before wake candidacy
      * may start. A single elevated sample must never count — REM lifts HR without wakefulness.
      */
+    /**
+     * Sustained elevated HR required to call a wake. Was a count of 2 cycles, which is 10 minutes
+     * at five-minute cadence and 2 minutes at one; two minutes of raised heart rate is a turn in
+     * bed, not a wake. Kept as a count for the state field, but the threshold is now derived from
+     * WAKE_HR_SUSTAIN_MINUTES and the observed cycle spacing. (2026-08-01)
+     */
     const val WAKE_HR_SUSTAIN_CYCLES = 2
+    const val WAKE_HR_SUSTAIN_MINUTES = 10.0
+
+    /** Cycles of elevated HR that amount to [WAKE_HR_SUSTAIN_MINUTES] at the given spacing. */
+    fun wakeHrSustainCycles(cycleSpacingMinutes: Double?): Int {
+        val spacing = (cycleSpacingMinutes ?: 5.0).coerceAtLeast(0.5)
+        return Math.round(WAKE_HR_SUSTAIN_MINUTES / spacing).toInt().coerceAtLeast(1)
+    }
+
 
     /**
      * Minimum FRESH HR samples within the fresh window for the feed to count as a reliable live
@@ -267,7 +281,13 @@ object SleepStateDetector {
         // stepsToday growth over the wake lookback clears sleepInStepsThreshold (the user's
         // ApsBoostSleepInSteps). 0 = disabled (legacy nightEnd hard-exit; strong-steps uses the constant).
         val sleepInStepsThreshold: Int = 0,
-        val sleepInWindowMin: Int = 0
+        val sleepInWindowMin: Int = 0,
+        /**
+         * Observed spacing between loop cycles, minutes. Null falls back to five. LAST in the
+         * list because Inputs is constructed positionally and inserting mid-list silently
+         * rebinds arguments. (2026-08-01)
+         */
+        val cycleSpacingMinutes: Double? = null
     )
 
     /**
@@ -497,7 +517,7 @@ object SleepStateDetector {
                     //    steps-alone does NOT wake (preserves the both-required guard).
                     val stepsConfirmWake = inputs.stepsLast15Min >= 100 || stepsInLookback >= WAKE_STEP_THRESHOLD
                     val hrAboveWakeFloor = avgHr != null && avgHr > wakeFloor &&
-                        newState.hrHighStreak >= WAKE_HR_SUSTAIN_CYCLES
+                        newState.hrHighStreak >= wakeHrSustainCycles(inputs.cycleSpacingMinutes)
                     val gentleWake = stepsConfirmWake && hrAboveWakeFloor && nearScheduledWake
                     val strongStepsWake = stepsInLookback >= strongStepsThreshold && (droughtEstablished || inLieIn)
                     if (gentleWake || strongStepsWake) {

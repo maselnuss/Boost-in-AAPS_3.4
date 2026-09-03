@@ -52,6 +52,34 @@ object BoostV5AutoConfig {
 
     /** History window for auto-config (also used by the plugin's data pulls). */
     const val LOOKBACK_DAYS = 14L
+
+    /**
+     * PERIODIC RE-DERIVATION (2026-08-03). Auto-config derives once at migration; a person drifts.
+     * The cadence grid over real history (backtesting/scripts/2026-08-autoconfig-redrive/
+     * CADENCE_GRID.md, 8 users) priced every window/step pair:
+     *
+     *   W/S    lag(d)  changes/6mo  travel:progress  moves surviving the deadband
+     *   14/7    10.5      15.9           5.0                 6.09
+     *   14/14   14         8.8           3.2                 4.10
+     *   28/7    17.5      13.4           3.9                 2.89
+     *   28/14   21         7.1           2.7                 2.40
+     *   28/28   28         4.1           3.0                 1.79
+     *
+     * 28 days is the window because 14 is noise-dominated: two independent 14-day derivations of
+     * the SAME fortnight differ by 0.69 U [0.30, 1.17] on confirmedCap. 7 days is the cadence
+     * because evaluating often is cheap once the deadband, not the schedule, decides whether to
+     * write. Effective lag is W/2 + S/2 ~ 17.5 d, which is immaterial against what is being
+     * tracked: TDD drift, whose 5-month drift-to-noise ratio is only 2.72 [1.15, 4.59].
+     */
+    /**
+     * Re-derivation persistence schema version. 2 = movement tracking with baselines (rev 2).
+     * A stored version below this means the last-run clock was written by a build whose
+     * re-derivation could never do anything, so it must not gate this one.
+     */
+    const val REDRIVE_SCHEMA_VERSION = 2
+
+    const val REDRIVE_INTERVAL_DAYS = 7L
+    const val REDRIVE_LOOKBACK_DAYS = 28L
     private const val SEV54_TARGET = 1.0      // % time <54 mg/dL
 
     /**
@@ -238,19 +266,36 @@ object BoostV5AutoConfig {
         // excess), and the DELIVERY routes hypo-prone through the retractable temp-basal (safe by
         // unwinding) rather than a bolus. The primer size is derived from the user's own routine SMB
         // (committedCapU), so U200 users are already scaled in their own units.
+        // 2026-07-30 RE-LEVELLED for the sizing rework. primerCapU used to be a BASE that the
+        // acceleration scale multiplied by up to PRIMER_MAX_MULT=2.0, so the delivered peak was
+        // 2 x committedCapU x frac — and, because the scale saturated at deltaAccl>=30, that peak was
+        // paid on 5 of 6 observed live fires including flat traces. The scale is gone: primerCapU is now
+        // a TRUE CEILING reached only at a confirm-strength rise (delta>=8) with BG in band and IOB
+        // headroom. Keeping the old fracs would therefore have HALVED the peak and left the sized dose
+        // rounding to 0U at most real onsets. Fracs are raised 1.5x so the new ceiling lands at
+        // 0.75 x the old effective peak: a deliberate 25% cut at full strength, on top of the much
+        // larger cut everywhere below it (measured ~85% less primer insulin overall, concentrated on
+        // genuine rises). See backtesting/scripts/2026-07-primer-scaling.
         val primerFrac = when {
-            hypoProne       -> 0.25
-            wellControlled  -> 0.5
-            else            -> 0.4
+            hypoProne       -> 0.375
+            wellControlled  -> 0.75
+            else            -> 0.6
         }
-        val primerCapU = round2((committedCapU * primerFrac).coerceIn(0.0, 0.6))
+        // Clamp is now SELF-SCALING instead of a flat constant. The old flat 0.6 (and the 0.9 that
+        // briefly replaced it) clipped high-need users: a well-controlled user with committedCapU 2.5
+        // derives 2.5 x 0.75 = 1.875 and was being cut to 0.9. The principled bound is ONE COMMIT-SHOT —
+        // the primer is an advance on the CONFIRMED shot, so it should never exceed the shot it advances.
+        // primerFrac is <= 0.75, so this clamp is a belt-and-braces invariant rather than a cutoff, and
+        // it scales in the user's OWN units (committedCapU is derived from their own SMB distribution, so
+        // U200 users are already handled). Matches DoubleKey.ApsBoostV5PrimerCapU's max of 2.5.
+        val primerCapU = round2((committedCapU * primerFrac).coerceIn(0.0, committedCapU))
         // Route only CLEARLY well-controlled users to the bolus; everyone else gets the retractable
         // temp-basal (safe-by-unwinding). The bolus is thus inherently TBR-safe (well-controlled only),
         // so the primer cap is NOT raise-guarded — the delivery routing is the safety differentiator.
         // A user can force the bolus via ApsBoostV5PrimerBolusMode (the override).
         val primerTbrFallback = !wellControlled
         run {
-            val why = "Primer ${primerCapU}U ${if (primerTbrFallback) "via retractable temp-basal (override-able to bolus)" else "as bolus (well-controlled)"} — reclaims V1's ~15-min earlier acceleration response, fizzle-safe by size, netted off the commit-shot"
+            val why = "Primer ceiling ${primerCapU}U ${if (primerTbrFallback) "via retractable temp-basal (recommended; override-able to bolus)" else "as bolus (well-controlled)"} — reclaims V1's earlier acceleration response. This is now a CEILING paid only on a confirm-strength rise (delta≥${PRIMER_DELTA_MIN.toInt()} to fire, full at ≥${PRIMER_DELTA_FULL.toInt()} mg/dL/5min) and scaled down by BG room and IOB headroom; the old acceleration multiplier is removed because it paid most on flat traces"
             reasons += why
             rationaleByKey[DoubleKey.ApsBoostV5PrimerCapU] = why
             rationaleByBooleanKey[BooleanKey.ApsBoostV5PrimerTbrFallback] = if (primerTbrFallback)

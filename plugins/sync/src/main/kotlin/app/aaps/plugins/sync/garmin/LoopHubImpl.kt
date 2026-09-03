@@ -206,18 +206,36 @@ class LoopHubImpl @Inject constructor(
         device: String?
     ) {
         if (timestampMs <= 0L) return
-        // A trailing-window count has a physical ceiling; above about 200 steps a minute it is a
-        // cumulative counter rather than a window. A Venu 3 sent 1919 in all six windows at once on
-        // 2026-08-27, which the activity classifier reads as six times a brisk walk and treats as
-        // continuous exercise. See GarminStepWindows.
+        // A trailing-window count has a physical ceiling: nobody takes more than about 200 steps a
+        // minute, and a sprint is under that. A watch reporting 1919 steps in five minutes is
+        // reporting something else, and on 2026-08-27 one was: a Venu 3 sent the cumulative daily
+        // counter in all six windows at once, because the device-side reset handling returns the
+        // whole counter when it sees a negative delta. Fifteen minutes at 1919 is six times the
+        // brisk-walk threshold the activity classifier uses, so the loop would have read continuous
+        // vigorous exercise and raised the target accordingly.
+        //
+        // Clamping rather than rejecting: a clamped value is still wrong but it is bounded and it
+        // keeps a genuine burst, whereas dropping the record loses the cycle entirely. The wider
+        // windows are also clamped from below by the narrower ones, since a three-hour count cannot
+        // be less than the five-minute count inside it.
         val w = GarminStepWindows.sanitise(
             steps5min, steps10min, steps15min, steps30min, steps60min, steps180min
         )
+        val s5 = w.s5; val s10 = w.s10; val s15 = w.s15
+        val s30 = w.s30; val s60 = w.s60; val s180 = w.s180
+        if (s5 != steps5min || s180 != steps180min) {
+            aapsLogger.warn(
+                LTag.GARMIN,
+                "steps clamped from ${device ?: "Garmin"}: " +
+                    "5/$steps5min→$s5 10/$steps10min→$s10 15/$steps15min→$s15 " +
+                    "30/$steps30min→$s30 60/$steps60min→$s60 180/$steps180min→$s180"
+            )
+        }
         val sc = SC(
             duration = 300_000L,          // 5-min snapshot (mirrors the wear cadence)
             timestamp = timestampMs,
-            steps5min = w.s5, steps10min = w.s10, steps15min = w.s15,
-            steps30min = w.s30, steps60min = w.s60, steps180min = w.s180,
+            steps5min = s5, steps10min = s10, steps15min = s15,
+            steps30min = s30, steps60min = s60, steps180min = s180,
             device = device ?: "Garmin",
             dateCreated = clock.millis(),
         )

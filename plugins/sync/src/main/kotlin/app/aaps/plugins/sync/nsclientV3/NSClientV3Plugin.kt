@@ -104,6 +104,7 @@ import kotlinx.serialization.json.Json
 import java.security.InvalidParameterException
 import javax.inject.Inject
 import javax.inject.Singleton
+import kotlin.math.max
 
 @Singleton
 class NSClientV3Plugin @Inject constructor(
@@ -190,6 +191,26 @@ class NSClientV3Plugin @Inject constructor(
      */
     var doingFullSync = false
         @VisibleForTesting set
+
+    /**
+     * Lower bound (epoch ms) for a BOUNDED history backfill requested via [requestHistoryBackfill].
+     * 0 = none, and the first load then falls back to the usual `now - maxAge` (100 day) ceiling.
+     *
+     * PERSISTED, unlike [firstLoadContinueTimestamp]: an app restart part-way through a backfill
+     * would otherwise lose the bound and silently widen a deliberate 14-day request into a 100-day
+     * one. Only consulted on the FIRST-LOAD branch of the load workers, so it is inert once the
+     * collection's `lastLoadedSrvModified` is set; [resetToFullSync] clears it so a manual, genuinely
+     * full sync is never clamped by a stale bound.
+     */
+    internal var historyBackfillFrom: Long
+        get() = preferences.get(NsclientLongKey.HistoryBackfillFrom)
+        set(value) = preferences.put(NsclientLongKey.HistoryBackfillFrom, value)
+
+    /**
+     * Oldest timestamp the first load may reach back to: the 100-day ceiling, raised by an active
+     * bounded-backfill request. Used by [LoadBgWorker] / [LoadTreatmentsWorker].
+     */
+    internal fun firstLoadFloor(): Long = max(dateUtil.now() - maxAge, historyBackfillFrom)
 
     private val serviceConnection: ServiceConnection = object : ServiceConnection {
         override fun onServiceDisconnected(name: ComponentName) {
@@ -425,11 +446,51 @@ class NSClientV3Plugin @Inject constructor(
         firstLoadContinueTimestamp = LastModified(LastModified.Collections())
         lastLoadedSrvModified = LastModified(LastModified.Collections())
         initialLoadFinished = false
+        // A manual full sync is deliberately unbounded — drop any bounded-backfill floor, or it
+        // would silently clamp this to the last requested window.
+        historyBackfillFrom = 0L
         storeLastLoadedSrvModified()
         dataSyncSelectorV3.resetToNextFullSync()
         synchronized(fullSyncSemaphore) {
             fullSyncRequested = true
         }
+    }
+
+    /**
+     * Bounded, download-only history backfill — see [NsClient.requestHistoryBackfill].
+     *
+     * Rewinds ONLY the two download cursors that matter for a history gap (entries + treatments)
+     * back to [fromTimestamp], and marks the load as a full sync so the NS "accept data" preferences
+     * — all of which ship OFF — do not silently discard the very records being fetched. It does NOT
+     * touch [dataSyncSelectorV3], so nothing is re-uploaded to the server.
+     *
+     * Non-blocking: the actual fetch is the existing LoadBg/LoadTreatments worker chain, kicked on
+     * this plugin's own handler thread. `forceNew = false` so a round already in flight is joined
+     * rather than waited on.
+     */
+    override fun requestHistoryBackfill(fromTimestamp: Long): Boolean {
+        if (!isEnabled()) return false
+        if (preferences.get(NsclientBooleanKey.NsPaused)) return false
+        if (preferences.get(StringKey.NsClientUrl).isBlank()) return false
+        val handler = this.handler ?: return false
+        // Never reach back further than this client would on a first load anyway.
+        val from = max(fromTimestamp, dateUtil.now() - maxAge)
+        // Rewind the download cursors only. Zeroing lastLoadedSrvModified is what makes
+        // isFirstLoad() true, which is the branch that honours firstLoadContinueTimestamp/the floor;
+        // the workers restore it themselves when the load completes, exactly as on a fresh install.
+        historyBackfillFrom = from
+        firstLoadContinueTimestamp.collections.entries = from
+        firstLoadContinueTimestamp.collections.treatments = from
+        lastLoadedSrvModified.collections.entries = 0L
+        lastLoadedSrvModified.collections.treatments = 0L
+        initialLoadFinished = false
+        storeLastLoadedSrvModified()
+        synchronized(fullSyncSemaphore) {
+            fullSyncRequested = true
+        }
+        rxBus.send(EventNSClientNewLog("● RUN", "History backfill requested from ${dateUtil.dateAndTimeAndSecondsString(from)}"))
+        handler.post { executeLoop("HISTORY_BACKFILL", forceNew = false) }
+        return true
     }
 
     override fun handleClearAlarm(originalAlarm: NSAlarm, silenceTimeInMilliseconds: Long) {
@@ -785,6 +846,9 @@ class NSClientV3Plugin @Inject constructor(
         synchronized(fullSyncSemaphore) {
             doingFullSync = false
         }
+        // The whole loader chain completed, so any bounded backfill is done. If it FAILED part-way
+        // the chain never reaches here and the floor survives, so the next round resumes bounded.
+        historyBackfillFrom = 0L
     }
 
     private fun executeUpload(origin: String, forceNew: Boolean) {

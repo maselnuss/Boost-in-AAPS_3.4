@@ -21,7 +21,7 @@ class PrimerTest {
     private fun observingAccelInputs() = V5Inputs(
         delta = 6.0,
         shortAvgDelta = 5.0,
-        deltaAccl = 15.0,               // > PRIMER_ACCEL_THRESHOLD (10); scale = 1 + 5/20 = 1.25
+        deltaAccl = 15.0,               // > PRIMER_ACCEL_THRESHOLD (10) — shape confirmer only, no longer scales
         bg = 140.0,
         eventualBg = 150.0,
         targetBg = 100.0,
@@ -52,15 +52,54 @@ class PrimerTest {
     /** Persisted state pinned to OBSERVING age 0 (cannot confirm this cycle → stays OBSERVING). */
     private fun observing() = V5PersistedState(mealHypothesis = MealHypothesisState(MealHypothesis.OBSERVING, ageCycles = 0))
 
-    @Test fun `bolus primer fires in OBSERVING on accel - scaled, additive, excess to netting residual`() {
+    @Test fun `bolus primer fires in OBSERVING on a real rise - state-scaled below the ceiling`() {
         val d = determineBasal.decide(observingAccelInputs(), observing())
         assertThat(d.mealHypothesis).isEqualTo(MealHypothesis.OBSERVING)
-        // scale 1.25 × 0.3 = 0.375 → pump-rounded to 0.35
-        assertThat(d.primerBolusU).isWithin(1e-9).of(0.35)
-        assertThat(d.finalDose).isAtLeast(0.35)                               // folded into the delivered SMB
-        assertThat(d.newPersistedState.primerAppliedU).isWithin(1e-9).of(0.35)
+        // fRise (6.0−1.5)/(8.0−1.5)=0.6923 × fBg 1.0 (bg 140 in band) × fIob 1−1/8=0.875
+        //   → 0.3 × 0.6058 = 0.1817 → pump-rounded down to 0.15
+        assertThat(d.primerBolusU).isWithin(1e-9).of(0.15)
+        assertThat(d.primerBolusU).isAtMost(observingAccelInputs().primerCapU)   // cap is a CEILING now
+        assertThat(d.finalDose).isAtLeast(0.15)                               // folded into the delivered SMB
+        assertThat(d.newPersistedState.primerAppliedU).isWithin(1e-9).of(0.15)
         assertThat(d.newPersistedState.primerNettingResidualU).isWithin(1e-9).of(0.0)   // netting deferred to CONFIRMED
-        assertThat(d.newPersistedState.primerIobU).isWithin(1e-9).of(0.35)              // accrued for the confirm-time net-off
+        assertThat(d.newPersistedState.primerIobU).isWithin(1e-9).of(0.15)              // accrued for the confirm-time net-off
+        assertThat(d.primerScaleDebug).contains("fR=0.69")                     // factors are logged for the shadow
+    }
+
+    // ── 2026-07-30 sizing rework: the absolute-delta floor and the two suppressors ────────────────
+    @Test fun `no primer below the absolute delta floor even when acceleration is huge`() {
+        // The flat-trace failure mode: tiny delta, enormous ratio. deltaAccl 75 clears the old gate on
+        // its own; the delta floor is what now blocks it. This is the 2026-07-29 live incident shape.
+        val jitter = observingAccelInputs().copy(delta = 2.9, shortAvgDelta = 0.5, deltaAccl = 75.0)
+        assertThat(determineBasal.decide(jitter, observing()).primerBolusU).isEqualTo(0.0)
+    }
+
+    @Test fun `near-target BG sizes the primer to nothing (fBg lower shoulder)`() {
+        // An observed live fire sat at BG 92 on jitter. At bg 95 fBg = (95−90)/20 = 0.25, so even a
+        // genuine delta 6 rise sizes below the pump increment and delivers nothing.
+        val low = observingAccelInputs().copy(bg = 95.0)
+        assertThat(determineBasal.decide(low, observing()).primerBolusU).isEqualTo(0.0)
+    }
+
+    @Test fun `high BG fades the primer out entirely (no adding into a recovering tail)`() {
+        val high = observingAccelInputs().copy(bg = 225.0)   // above PRIMER_BG_CEIL
+        assertThat(determineBasal.decide(high, observing()).primerBolusU).isEqualTo(0.0)
+    }
+
+    @Test fun `primerCapU is a true ceiling - never exceeded however strong the rise`() {
+        // Full strength: delta at PRIMER_DELTA_FULL, BG mid-band, no IOB → all three factors 1.0.
+        val full = observingAccelInputs().copy(delta = 8.0, shortAvgDelta = 6.0, deltaAccl = 33.0,
+                                               bg = 150.0, iob = 0.0)
+        val d = determineBasal.decide(full, observing())
+        assertThat(d.primerBolusU).isAtMost(full.primerCapU)
+        // and it does reach the ceiling rather than being stuck far below it
+        assertThat(d.primerBolusU).isAtLeast(full.primerCapU - full.roundSmbTo)
+    }
+
+    @Test fun `IOB headroom scales the primer down (fIob)`() {
+        val lowIob = determineBasal.decide(observingAccelInputs().copy(iob = 0.0), observing())
+        val highIob = determineBasal.decide(observingAccelInputs().copy(iob = 6.0), observing())
+        assertThat(highIob.primerBolusU).isLessThan(lowIob.primerBolusU)
     }
 
     @Test fun `primer off when primerCapU is 0`() {
@@ -82,7 +121,7 @@ class PrimerTest {
     @Test fun `temp-basal mode - primer computed but NOT folded into finalDose`() {
         val tbr = determineBasal.decide(observingAccelInputs().copy(primerUseTempBasal = true), observing())
         val off = determineBasal.decide(observingAccelInputs().copy(primerCapU = 0.0), observing())
-        assertThat(tbr.primerBolusU).isWithin(1e-9).of(0.35)
+        assertThat(tbr.primerBolusU).isWithin(1e-9).of(0.15)
         assertThat(tbr.primerUseTempBasal).isTrue()
         // finalDose in temp-basal mode equals the primer-off finalDose (the primer rides a temp basal,
         // set at the seam — it does NOT inflate the SMB).

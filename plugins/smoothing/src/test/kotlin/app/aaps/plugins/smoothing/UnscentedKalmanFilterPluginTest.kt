@@ -130,4 +130,50 @@ internal class UnscentedKalmanFilterPluginTest {
         val damped = plugin(iobLazy(0.1)).smooth(series(*vals))[0].smoothed!!
         assertThat(followed).isLessThan(damped - 5.0)     // followed down, NOT held up by the gate
     }
+
+    // ── One-minute cadence (2026-08-01) ─────────────────────────────────────────────────────
+    // The filter is fed the five-minute bucketed series today, so every spacing it has ever seen
+    // is 5.0. Routing it to a native one-minute series exposed three assumptions tuned there.
+
+    @Test fun `a one-minute series is actually smoothed, not passed through`() {
+        // Before the fix the segment test required spacing in 2.0..60.0, so every consecutive
+        // pair broke a segment, none reached the two-sample minimum, and findValidSegments
+        // returned empty. The filter then fell back to copying raw values and did nothing at all.
+        val noisy = series(120.0, 118.0, 123.0, 119.0, 124.0, 120.0, 125.0, 121.0,
+                           126.0, 122.0, 127.0, 123.0, stepMin = 1)
+        val out = plugin().smooth(noisy)
+        val changed = out.count { it.smoothed != it.value }
+        assertThat(changed).isGreaterThan(0)
+    }
+
+    @Test fun `the same series at five minutes is smoothed too, so the fix is not cadence-specific`() {
+        val noisy = series(120.0, 118.0, 123.0, 119.0, 124.0, 120.0, 125.0, 121.0,
+                           126.0, 122.0, 127.0, 123.0, stepMin = 5)
+        val out = plugin().smooth(noisy)
+        assertThat(out.count { it.smoothed != it.value }).isGreaterThan(0)
+    }
+
+    @Test fun `median spacing is read from the data`() {
+        val p = plugin()
+        assertThat(p.medianSpacingMinutes(series(100.0, 101.0, 102.0, 103.0, stepMin = 1))).isEqualTo(1.0)
+        assertThat(p.medianSpacingMinutes(series(100.0, 101.0, 102.0, 103.0, stepMin = 5))).isEqualTo(5.0)
+        assertThat(p.medianSpacingMinutes(series(100.0))).isNull()
+    }
+
+    @Test fun `duration-defined windows resize with cadence`() {
+        // R adaptation is meant to be 90 minutes and compression follow-through 15 minutes.
+        // Both were fixed reading counts tuned at five-minute spacing.
+        val atFive = plugin().apply { adaptWindowsToCadence(series(100.0, 101.0, 102.0, 103.0, stepMin = 5)) }
+        val atOne = plugin().apply { adaptWindowsToCadence(series(100.0, 101.0, 102.0, 103.0, stepMin = 1)) }
+        assertThat(atFive.innovationWindowForTest()).isEqualTo(18)   // 90 / 5
+        assertThat(atOne.innovationWindowForTest()).isEqualTo(90)    // 90 / 1, not 18
+        assertThat(atFive.maxCompressionForTest()).isEqualTo(3)      // 15 / 5
+        assertThat(atOne.maxCompressionForTest()).isEqualTo(15)      // 15 / 1, not 3
+    }
+
+    @Test fun `an unreadable spacing falls back to the five-minute counts`() {
+        val p = plugin().apply { adaptWindowsToCadence(series(100.0)) }
+        assertThat(p.innovationWindowForTest()).isEqualTo(18)
+        assertThat(p.maxCompressionForTest()).isEqualTo(3)
+    }
 }

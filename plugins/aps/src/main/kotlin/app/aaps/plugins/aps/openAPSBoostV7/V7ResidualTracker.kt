@@ -103,7 +103,13 @@ class V7ResidualTracker {
         const val MATURE_LATE_TOL_MS = 300_000L
 
         /** 5-min cycle bucket for multi-invoke dedup — same bucketing as the offline loader. */
-        const val CYCLE_BUCKET_MS = 300_000L
+        /**
+         * De-duplication bucket: two entries in the same bucket are the same cycle re-run, so the
+         * newer replaces the older. At 300_000 (five minutes) a one-minute loop had four of every
+         * five entries silently replaced, so the tracker saw a fifth of the data it thought it
+         * had. One minute keeps every genuine cycle while still collapsing a re-run. (2026-08-01)
+         */
+        const val CYCLE_BUCKET_MS = 60_000L
 
         /** The five exposed percentiles (5/25/50/75/95) — the substrate's validated surface;
          *  the ≤5% left tail is NOT fittable (report §1 tail honesty). */

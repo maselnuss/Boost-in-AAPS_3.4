@@ -49,6 +49,15 @@ enum class BooleanKey(
     ApsUseDynamicSensitivity("use_dynamic_sensitivity", false),
     ApsUseAutosens("openapsama_useautosens", true, defaultedBySM = true, negativeDependency = ApsUseDynamicSensitivity), // change from default false
     ApsUseSmb("use_smb", true, defaultedBySM = true), // change from default false
+    /**
+     * Run the loop at the sensor's own cadence instead of once per five-minute bucket.
+     *
+     * OFF by default, and a no-op on a five-minute sensor, where the native series and the
+     * bucketed series are the same object. On a one-minute sensor it is the difference between a
+     * five-minute loop that happens to be reading one-minute data, and a loop that actually runs
+     * every minute. Those are separate interventions and this is what separates them. (2026-08-09)
+     */
+    ApsLoopAtNativeCadence("loop_at_native_cadence", false),
     ApsUseSmbWithHighTt("enableSMB_with_high_temptarget", false, defaultedBySM = true, dependency = ApsUseSmb),
     ApsUseSmbAlways("enableSMB_always", true, defaultedBySM = true, dependency = ApsUseSmb), // change from default false
     ApsUseSmbWithCob("enableSMB_with_COB", true, defaultedBySM = true, dependency = ApsUseSmb), // change from default false
@@ -130,11 +139,28 @@ enum class BooleanKey(
     // score-corroborated rise while awake & not exercising. Replay-validated (backtesting/replay.py).
     // Default ON (it's the fix for the 2026-06-16 fast-carb crash); toggle OFF = instant revert.
     ApsBoostV5FastCarbConfirm("boost_v5_fast_carb_confirm", true, defaultedBySM = true),
+    // 2026-08-27 confirm tranche — split the confirm commitment, part now and the rest ten minutes
+    // later if the rise continues. The confirm shot is the same size whether the excursion reaches
+    // 20 mg/dL or 100, and the trace separates those two ends at 0.730 at the confirming cycle
+    // against 0.893 ten minutes on. Can only deliver LESS than without it, never more.
+    // AUTO-CONFIG MANAGED in the shipping form: the release rule's coefficients are population
+    // derived and only the threshold is personal, so this is not a per-user preference.
+    ApsBoostV5ConfirmTranche("boost_v5_confirm_tranche", false, defaultedBySM = true),
     // 2026-07-17 aggressive early-confirm — shaves the sustained-score early-confirm path one more
     // cycle (age −2). The pre-push backtest showed ~28% of its candidates are fizzle-catches (new
     // insulin at ~base rate), so it is NOT a clean cohort default; it is OPT-IN and AUTO-CONFIG
     // MANAGED (BoostV5AutoConfig enables it only for clearly well-controlled users). Default OFF.
     ApsBoostV5AggressiveEarlyConfirm("boost_v5_aggressive_early_confirm", false, defaultedBySM = true),
+    // 2026-08-03 post-rescue TIGHT-RAMP TRIAL enrolment (pre-registered within-user crossover —
+    // backtesting/protocols/2026-08_postrescue_tight_ramp_PREREG.md). When enrolled, days are
+    // randomised into a treatment arm that caps the post-rescue rebound scale at 0.60 and applies
+    // it across the WHOLE window (today the guard is gated off at BG >= 170). Both arms are at or
+    // below the shipped dose on every cycle — the trial can never deliver MORE insulin than today.
+    // Cohort evidence is UNPROVEN (2026-08-03 ramp study: every candidate ramp's cluster-bootstrap
+    // CI overlaps zero; only 2 of 8 users show favourable targeting), which is exactly why this is
+    // a randomised trial and not a ship. Default OFF; NOT auto-config managed — enrolment is a
+    // deliberate per-user act.
+    ApsBoostPostRescueTightRampTrial("boost_postrescue_tight_ramp_trial", false, defaultedBySM = true),
     // 2026-07 composed Phase-3 brake floor (F = 0.25) — when ON (and V6 is the active doser), the
     // delivered dose is floored at min(budget × 0.25, committedCapU) on meal-session high cycles
     // (CONFIRMED/COMMITTED/RECOVERING ∧ BG > 160 ∧ eventualBG > target+20 ∧ awake ∧ not post-rescue ∧

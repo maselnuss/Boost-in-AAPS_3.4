@@ -129,6 +129,36 @@ android {
             manifestPlaceholders["appIcon"] = "@mipmap/ic_launcher"
             manifestPlaceholders["appIconRound"] = "@mipmap/ic_launcher_round"
         }
+        // Two further instances of the full application, identical in behaviour and differing only
+        // in application id, so that three can be installed on one handset and configured
+        // separately. Android keys an installation by application id, so each gets its own storage,
+        // its own preferences and its own database with no further work. Intended for the cadence
+        // study, where the arms have to run on one sensor and one body at the same time; only one
+        // instance may be paired to a real pump and the others take the virtual pump.
+        create("fullb") {
+            applicationId = "info.nightscout.androidaps.b"
+            dimension = "standard"
+            resValue("string", "app_name", "AAPS B")
+            versionName = Versions.appVersion + "-b"
+            manifestPlaceholders["appIcon"] = "@mipmap/ic_yellowowl"
+            manifestPlaceholders["appIconRound"] = "@mipmap/ic_yellowowl"
+        }
+        create("fullc") {
+            applicationId = "info.nightscout.androidaps.c"
+            dimension = "standard"
+            resValue("string", "app_name", "AAPS C")
+            versionName = Versions.appVersion + "-c"
+            manifestPlaceholders["appIcon"] = "@mipmap/ic_blueowl"
+            manifestPlaceholders["appIconRound"] = "@mipmap/ic_blueowl"
+        }
+        create("fulld") {
+            applicationId = "info.nightscout.androidaps.d"
+            dimension = "standard"
+            resValue("string", "app_name", "AAPS D")
+            versionName = Versions.appVersion + "-d"
+            manifestPlaceholders["appIcon"] = "@mipmap/ic_launcher"
+            manifestPlaceholders["appIconRound"] = "@mipmap/ic_launcher_round"
+        }
         create("pumpcontrol") {
             applicationId = "info.nightscout.aapspumpcontrol"
             dimension = "standard"

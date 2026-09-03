@@ -101,6 +101,37 @@ import kotlin.math.min
 import app.aaps.plugins.aps.openAPSBoostV5.MealHypothesis
 import app.aaps.plugins.aps.openAPSBoostV5.RECOVERING_DECEL_THRESHOLD
 
+/**
+ * 2026-07-30 implausible-TDD guard for dynamic ISF. Minimum blended TDD, as a fraction of the TDD the
+ * user's own profile ISF implies via the 1800 rule (profileISF ~= 1800/TDD). Below this the insulin
+ * history is treated as incomplete and dynamic ISF is NOT derived — the profile ISF is used instead.
+ *
+ * 0.35 is deliberately liberal. The fallback direction is safe (profileSens is the user's configured
+ * value), so a false positive costs one cycle of dynamic responsiveness and nothing else, whereas a
+ * false NEGATIVE paralyses dosing: the field case that motivated this had TDD at 0.22 of implied and
+ * ran ~88x profile ISF, delivering nothing for 3.5 h. Every activation is logged (LTag.APS) and lands
+ * in consoleError, so the true false-positive rate is auditable across the cohort before tightening.
+ */
+private const val DYNISF_MIN_TDD_FRACTION = 0.35
+
+/**
+ * True when [tdd] is too low to be believed given what [profileSens] implies, so dynamic ISF must NOT
+ * be derived from it. Extracted as a pure function so the guard is unit-testable independently of the
+ * plugin's DI graph. Returns false when [profileSens] is non-positive (no reference to judge against —
+ * fail OPEN there, because the existing `tdd > 0` check still applies downstream).
+ */
+internal fun tddImplausibleForProfile(tdd: Double, profileSens: Double): Boolean {
+    if (profileSens <= 0.0) return false
+    val impliedTdd = 1800.0 / profileSens
+    return tdd < impliedTdd * DYNISF_MIN_TDD_FRACTION
+}
+
+// @Singleton MUST stay adjacent to this declaration. 2026-07-30..08-04: a KDoc, a constant and a
+// helper function were inserted between the two, which silently moved the annotation onto the
+// constant and left the engine UNSCOPED. OpenAPSBoostV5Plugin injects it and reads lastAPSResult
+// back through the same reference, so every cycle built its result on one instance and the loop
+// read null from another — "NO APS SELECTED OR PROVIDED RESULT", nothing enacted, for five days.
+// Verified in the generated component: the binding had no DoubleCheck wrapper.
 @Singleton
 open class OpenAPSBoostPlugin @Inject constructor(
     aapsLogger: AAPSLogger,
@@ -160,6 +191,17 @@ open class OpenAPSBoostPlugin @Inject constructor(
         .description(R.string.description_boost),
     aapsLogger, rh
 ), APS, PluginConstraints {
+
+
+    /** The volume-weighted dose shadow, held on preferences as the other shadows are. It logs
+     *  an alternative blend and reaches nothing on the dose path. */
+    private val vwaTddShadow by lazy {
+        BoostVwaTddShadow(
+            loadState = { preferences.getBoostDosing(StringKey.ApsBoostVwaTddShadowState) },
+            saveState = { preferences.put(StringKey.ApsBoostVwaTddShadowState, it) },
+            logInfo = { aapsLogger.debug(LTag.APS, it) },
+        )
+    }
 
     companion object {
         /**
@@ -407,6 +449,8 @@ open class OpenAPSBoostPlugin @Inject constructor(
     // Anticipatory back-out controller SHADOW (2026-07-20): retractable-anticipation state machine, held
     // in memory across cycles. READ-ONLY — logs antBackout=...; delivers nothing. See BACKOUT_CONTROLLER_SPEC.
     private val backoutShadow by lazy { app.aaps.plugins.aps.openAPSBoostTwin.AnticipationBackoutShadow() }
+    private val consequenceShadow by lazy { app.aaps.plugins.aps.openAPSBoostV5.ConsequencePriorShadow() }
+    private val confirmTranche by lazy { app.aaps.plugins.aps.openAPSBoostV5.ConfirmTrancheController() }
     // Per-user ANTICIPATION shadow (2026-07-27): refits per-user exercise/meal onset-hazard models
     // offline, predicts p(onset) at 45-min lead, runs the two retractable arms in shadow. READ-ONLY —
     // logs anticip=...; delivers nothing. Onset history persists as a StringKey JSON blob (V7 idiom).
@@ -515,7 +559,8 @@ open class OpenAPSBoostPlugin @Inject constructor(
         val isfDebug: String = "",
         // ISF shadow — V4.4.2-style EMA(τ=3h) sensitivity ratio computed in parallel for
         // comparison. Null when TDD inputs unavailable. Does not influence dosing.
-        val tddSensShadow: BoostIsfShadow.TddSensShadowResult? = null
+        val tddSensShadow: BoostIsfShadow.TddSensShadowResult? = null,
+        val vwaTddShadow: BoostVwaTddShadow.Result? = null
     )
 
     private fun calculateBoostIsf(
@@ -541,6 +586,7 @@ open class OpenAPSBoostPlugin @Inject constructor(
         var ratio = 1.0
         // ISF shadow accumulator — populated when V4.4.2-style EMA ratio is computed below.
         var isfShadowResult: BoostIsfShadow.TddSensShadowResult? = null
+        var vwaShadowResult: BoostVwaTddShadow.Result? = null
         var tdd = 0.0
         val bgCurrent = if (glucoseValue > bgCap) bgCap + ((glucoseValue - bgCap) / 3.0) else glucoseValue
 
@@ -589,7 +635,38 @@ open class OpenAPSBoostPlugin @Inject constructor(
 
                 // Safety: TDD must be positive and produce a sane ISF
                 val logTerm = ln((bgNormalTarget / insulinDivisor) + 1.0)
-                if (tdd > 0 && logTerm > 0) {
+                // 2026-07-30 IMPLAUSIBLE-TDD GUARD. The old condition was `tdd > 0` only, and the
+                // comment above claimed it ensured "a sane ISF" — it did not. A TDD of 0.1 U/day
+                // passes, and 1800/(tdd × logTerm) then explodes. Observed in the field on a
+                // cross-fork migration: a fresh AAPS database reported TDD 3.1–4.1 U/day against a
+                // true ~20, dynamic ISF reached 5550–8944 mg/dL/U against a profile ISF of 100
+                // (~88×), insulinReq computed at or below zero, and the loop delivered NOTHING for
+                // 3.5 h while BG climbed to 276 — 19 consecutive zero temp basals, no lows, no alarm.
+                //
+                // The floor is anchored on the profile's OWN implied TDD via the 1800 rule
+                // (profileISF ≈ 1800/TDD), so it is self-scaling per user and needs no magic ISF
+                // multiplier: a U200 user, a child and a high-TDD adult are all handled by their own
+                // profile. Falling back is SAFE-SIGNED — profileSens is the value the user/clinician
+                // configured, so a false positive costs dynamic responsiveness for that cycle and
+                // nothing else, which is why the fraction is set liberally rather than tightly.
+                val impliedTdd = if (profileSens > 0) 1800.0 / profileSens else 0.0
+                val tddImplausible = tddImplausibleForProfile(tdd, profileSens)
+                if (tddImplausible) {
+                    // Leave sensNormalTarget at profileSens (its initial value) — do NOT derive.
+                    debug.append(
+                        "\n⚠ dynISF=PROFILE-FALLBACK: TDD ${Round.roundTo(tdd, 0.1)} U/day is below " +
+                            "${Round.roundTo(impliedTdd * DYNISF_MIN_TDD_FRACTION, 0.1)} " +
+                            "(${(DYNISF_MIN_TDD_FRACTION * 100).toInt()}% of the ${Round.roundTo(impliedTdd, 0.1)} " +
+                            "implied by profile ISF ${Round.roundTo(profileSens, 0.1)}) — insulin history looks " +
+                            "incomplete; using profile ISF instead of a derived one this cycle"
+                    )
+                    aapsLogger.info(
+                        LTag.APS,
+                        "Boost dynISF profile-fallback: tdd=${Round.roundTo(tdd, 0.1)} < " +
+                            "${Round.roundTo(impliedTdd * DYNISF_MIN_TDD_FRACTION, 0.1)} implied-floor; using profileSens=$profileSens"
+                    )
+                }
+                if (tdd > 0 && logTerm > 0 && !tddImplausible) {
                     sensNormalTarget = 1800.0 / (tdd * logTerm)
                     sensNormalTarget *= globalScale
                     debug.append("\nTDD ISF at target: ${Round.roundTo(sensNormalTarget, 0.1)} mg/dl/U (profile was ${Round.roundTo(profileSens, 0.1)})")
@@ -611,6 +688,32 @@ open class OpenAPSBoostPlugin @Inject constructor(
                     )
                     if (isfShadowResult != null) {
                         debug.append("\n${isfShadowResult.debugLine}")
+                    }
+
+                    // Volume-weighted dose shadow. Computes an alternative blend from the
+                    // insulin delivered so far today against the participant's own delivery
+                    // curve, and logs it. It does not touch tdd, sensNormalTarget or anything
+                    // downstream: the candidate failed one of the four pre-registered targets
+                    // it was judged on, and the only route from here to dosing is a
+                    // pre-registered within-person trial.
+                    val nowForVwa = System.currentTimeMillis()
+                    val sinceAnchorH = ((nowForVwa - vwaTddShadow.dayAnchorMs(nowForVwa))
+                        / 3_600_000L).coerceIn(0L, 24L)
+                    val deliveredToday = if (sinceAnchorH > 0L)
+                        tddCalculator.calculateDaily(-sinceAnchorH, 0L)?.totalAmount else 0.0
+                    // Read one day of stored history per cycle until the curve stands on the
+                    // participant rather than on the population. Costs 48 window totals on a
+                    // cycle and stops after seven days.
+                    vwaTddShadow.warmFromHistory(nowForVwa) { startH, endH ->
+                        tddCalculator.calculateDaily(startH, endH)?.totalAmount
+                    }
+                    vwaShadowResult = vwaTddShadow.compute(
+                        nowMs = nowForVwa,
+                        deliveredSinceDayStart = deliveredToday,
+                        tdd7D = tdd7D
+                    )
+                    if (vwaShadowResult != null) {
+                        debug.append("\n${vwaShadowResult.debugLine}")
                     }
                 } else {
                     debug.append("\n⚠ TDD calculation produced invalid values (tdd=$tdd, logTerm=$logTerm) — using profile ISF")
@@ -658,7 +761,8 @@ open class OpenAPSBoostPlugin @Inject constructor(
             ratio = Round.roundTo(ratio, 0.01),
             tdd = tdd,
             isfDebug = debug.toString(),
-            tddSensShadow = isfShadowResult
+            tddSensShadow = isfShadowResult,
+            vwaTddShadow = vwaShadowResult
         )
     }
 
@@ -1920,6 +2024,23 @@ open class OpenAPSBoostPlugin @Inject constructor(
                 aapsLogger.error(LTag.APS, "V6 pre-meal dose-comparison shadow call failed (non-fatal, real dosing below unaffected)", e)
             }
         }
+        // ── Post-rescue TIGHT-RAMP trial arm (2026-08-03, pre-registered crossover) ──
+        // Enrolment is an explicit per-user preference; the arm is a pure function of a
+        // once-generated install seed and the LOCAL day index, so the offline analysis can
+        // reproduce every day's assignment from the seed alone. Treatment days cap the
+        // post-rescue scale at 0.60 and apply it across the whole window; control days run the
+        // shipped guard untouched. Neither arm can dose above today's behaviour.
+        val tightRampCap: Double? = if (preferences.getBoostDosing(BooleanKey.ApsBoostPostRescueTightRampTrial)) {
+            var seed = preferences.getBoostDosing(StringKey.ApsBoostTrialSeed)
+            if (seed.isEmpty()) {                       // first cycle after enrolment
+                seed = java.util.UUID.randomUUID().toString()
+                preferences.put(StringKey.ApsBoostTrialSeed, seed)
+                aapsLogger.info(LTag.APS, "Post-rescue tight-ramp trial: seed generated, enrolled")
+            }
+            val dayIndex = java.time.Instant.ofEpochMilli(now)
+                .atZone(java.time.ZoneId.systemDefault()).toLocalDate().toEpochDay()
+            if (DetermineBasalBoost.tightRampArm(seed, dayIndex)) DetermineBasalBoost.TIGHT_RAMP_CAP else null
+        } else null
 
         determineBasalBoost.determine_basal(
             glucose_status = glucoseStatus,
@@ -1939,7 +2060,8 @@ open class OpenAPSBoostPlugin @Inject constructor(
             cumulativeSmbCap60Min = cumulativeSmbCap60Min,
             recentLowBG45Min = recentLowBG45Min,
             postRescueLowThresholdMgdl = postRescueLowThreshold,
-            timeSinceLastSmbMin = timeSinceLastSmbMin
+            timeSinceLastSmbMin = timeSinceLastSmbMin,
+            postRescueTightRampCap = tightRampCap
         ).also {
             // NS-visible shadow notes captured earlier in this cycle, BEFORE this rT object existed
             // (2026-08-26) — exercise-detection (Konzept 8), post-exercise-recovery duration/hyper-
@@ -1964,6 +2086,11 @@ open class OpenAPSBoostPlugin @Inject constructor(
                 it.consoleError?.add(note.trimEnd(' ', ';'))
             }
 
+            // Trial arm tag, every cycle (not only when the guard fires), so the analysis can
+            // count exposure on days the guard never engaged. enrolled,arm,cap.
+            it.reason.append(
+                "prTrial=${if (preferences.getBoostDosing(BooleanKey.ApsBoostPostRescueTightRampTrial)) 1 else 0}," +
+                    "${if (tightRampCap != null) "tight" else "control"},${tightRampCap ?: 0.0}; ")
             // ISF shadow telemetry — V1's actual variable_sens used the instantaneous
             // ratio = tdd24/tdd7; V4.4.2 would use an EMA(τ=3h) of the same. Compute
             // the implied shadow values for direct comparison:
@@ -1987,6 +2114,19 @@ open class OpenAPSBoostPlugin @Inject constructor(
                 it.units?.let { u ->
                     it.isfShadow_microBolus = Round.roundTo(u / scale, 0.001)
                 }
+            }
+
+            // Volume-weighted dose shadow. Read-only: the blend it proposes and the working
+            // behind it, so the paired estimates accumulate from the first cycle.
+            isfResult.vwaTddShadow?.let { v ->
+                it.boostVwa_blend = Round.roundTo(v.vwaBlend, 0.01)
+                it.boostVwa_projection = Round.roundTo(v.projection, 0.01)
+                it.boostVwa_expected = Round.roundTo(v.expectedToday, 0.01)
+                it.boostVwa_delivered = Round.roundTo(v.deliveredToday, 0.01)
+                it.boostVwa_dayFraction = Round.roundTo(v.dayFraction, 0.001)
+                it.boostVwa_calibratedTdd = Round.roundTo(v.calibratedTdd, 0.01)
+                it.boostVwa_curveDays = v.curveDays
+                it.boostVwa_usedPrevDay = v.usedPreviousDay
             }
             // Persist the v12 ML lookback ring buffer (updated in-place during this
             // cycle's inference) so the lag features survive a process restart.
@@ -2327,6 +2467,16 @@ open class OpenAPSBoostPlugin @Inject constructor(
                     }
                 }.onFailure { t -> aapsLogger.error(LTag.APS, "Overshoot-guard shadow failed (swallowed — dosing untouched)", t) }
             }
+            // Consequence prior SHADOW (2026-08-26). Logs a probability that this rise ends
+            // somewhere that matters, from glucose at the onset and the local hour. READ-ONLY.
+            // Included because the engine's own projection is at chance on that question (0.527
+            // against a 0.398 base rate on 27,619 onsets) while these two numbers reach 0.763, and
+            // adding the whole engine record to them is worth +0.001. Delivers NOTHING; a dose
+            // sized on this is a dosing change and goes to the two-test bar.
+            runCatching {
+                consequenceShadow.runCycle(now, glucoseStatus.glucose)
+                    ?.let { p -> it.reason.append("conseq=$p; ") }
+            }.onFailure { t -> aapsLogger.error(LTag.APS, "Consequence-prior shadow failed (swallowed — dosing untouched)", t) }
             // Sleep gate (2026-06-14): do NOT let V5 drive the SMB while SLEEPING — fall back to V1's
             // (oref1/Boost) SMB, which already respects night mode. V5 still computes its shadow
             // telemetry above (runShadow ran), so the V5-vs-V1 comparison continues overnight; only
@@ -2373,7 +2523,34 @@ open class OpenAPSBoostPlugin @Inject constructor(
                 // 27% of the removed insulin sits ahead of a second low <70 vs 14-19% for other levers;
                 // cost 10% genuine post-hypo meals at 0.15U median under-delivery).
                 val caps = applyV6OverrideCaps(inMealState, inPostRescueWindow, v5decision.finalDose, v1WouldDose, recentLowBG45Min)
-                val overrideDose = caps.dose
+                var overrideDose = caps.dose
+                // 2026-08-27 confirm tranche. Split the confirm commitment: part now, the rest ten
+                // minutes later only if the rise continues. The confirm shot is currently the same
+                // size whether the excursion reaches 20 mg/dL or 100, and the trace separates those
+                // two ends at 0.730 at the confirming cycle against 0.893 ten minutes on, a paired
+                // gain of +0.162 [+0.066, +0.264]. Bounded: this can only deliver LESS than the
+                // engine would without it.
+                //
+                // The release is evaluated inside this same block deliberately. Ten minutes after a
+                // confirm the block runs on 76.4% of cycles, and the 23.6% where it does not divide
+                // into exactly two causes, the rolling cumulative SMB cap and the sleep gate, both
+                // of which are states in which the engine has already decided against a micro bolus.
+                // A release that cannot land is that machinery agreeing with the withhold.
+                if (preferences.getBoostDosing(BooleanKey.ApsBoostV5ConfirmTranche)) {
+                    confirmTranche.immediateFraction = preferences.getBoostDosing(DoubleKey.ApsBoostV5TrancheFraction)
+                    confirmTranche.releaseThreshold = preferences.getBoostDosing(DoubleKey.ApsBoostV5TrancheThreshold)
+                    val before = overrideDose
+                    overrideDose = if (v5decision.mealHypothesis == MealHypothesis.CONFIRMED) {
+                        confirmTranche.onConfirm(now, glucoseStatus.glucose, before)
+                    } else {
+                        before + confirmTranche.onCycle(now, glucoseStatus.glucose)
+                    }
+                    it.reason.append("tranche=${Round.roundTo(before, 0.001)},"
+                        + "${Round.roundTo(overrideDose, 0.001)},"
+                        + "${Round.roundTo(confirmTranche.heldU(), 0.001)},"
+                        + "${confirmTranche.probeProbability(glucoseStatus.glucose)?.let { p -> Round.roundTo(p, 0.001) } ?: "-"},"
+                        + "${v5decision.mealHypothesis}; ")
+                }
                 it.units = overrideDose
                 it.reason.append("V6-ACTIVE drove SMB ${Round.roundTo(overrideDose, 0.001)}U (base would=${Round.roundTo(v1WouldDose, 0.001)}U, state=${v5decision.mealHypothesis}${caps.capNote}); ")
                 aapsLogger.info(LTag.APS, "V6-ACTIVE override: SMB ${v1WouldDose} → ${overrideDose} state=${v5decision.mealHypothesis}${caps.capNote}")
@@ -2430,9 +2607,27 @@ open class OpenAPSBoostPlugin @Inject constructor(
                     } else {
                         // Bolus mode: already folded into the SMB above (finalDose) + exempted from the
                         // non-meal cap. Just log the reclaimed early insulin.
-                        it.reason.append("primer=bolus,${Round.roundTo(v5decision.primerBolusU, 0.001)}U; ")
-                        aapsLogger.info(LTag.APS, "V6 primer (bolus): ${v5decision.primerBolusU}U folded into SMB")
+                        // 2026-07-30: if auto-config RECOMMENDED the retractable temp-basal route and the
+                        // user has overridden it to a bolus, say so in the reason. The override is always
+                        // honoured — auto-config never makes a setting unreachable — but an overridden
+                        // routing must be VISIBLE in the data, because it is the difference between a
+                        // primer the loop can unwind and one it cannot. Both live primer users had
+                        // silently overridden, which is why the 2026-07-29 incident could not be undone.
+                        val routeOverridden = preferences.getBoostDosing(BooleanKey.ApsBoostV5PrimerTbrFallback) &&
+                            preferences.getBoostDosing(BooleanKey.ApsBoostV5PrimerBolusMode)
+                        it.reason.append("primer=bolus,${Round.roundTo(v5decision.primerBolusU, 0.001)}U" +
+                            (if (routeOverridden) ";primerRoute=bolus-USER-OVERRIDE(recommended=tbr)" else "") + "; ")
+                        aapsLogger.info(LTag.APS, "V6 primer (bolus): ${v5decision.primerBolusU}U folded into SMB" +
+                            if (routeOverridden) " [user override of recommended temp-basal routing]" else "")
                     }
+                }
+                // 2026-07-30 primer sizing telemetry. Emitted whenever the primer GATE opened — including
+                // when the state factors sized it to nothing and it rounded to 0U (primerBolusU == 0, so
+                // the block above is skipped). Without this the shadow cannot tell "gate never opened"
+                // from "gate opened, correctly sized to zero", which is the whole point of the rework.
+                if (v5decision.primerScaleDebug.isNotEmpty()) {
+                    it.reason.append("primerScale=${v5decision.primerScaleDebug}" +
+                        (if (v5decision.primerBolusU <= 0.0) ",ROUNDED_TO_ZERO" else "") + "; ")
                 }
             } else if (v5Active && v5decision != null && cumulativeCapReached) {
                 it.units = 0.0
@@ -2612,7 +2807,8 @@ open class OpenAPSBoostPlugin @Inject constructor(
                         stepsToday = stepsTodayForSleep,
                         // 2026-07-08 sleep-in merge (v7-shadow): fold the lie-in backstop into the state machine.
                         sleepInStepsThreshold = sleepInSteps,
-                        sleepInWindowMin = (sleepInHours * 60.0).toInt()
+                        sleepInWindowMin = (sleepInHours * 60.0).toInt(),
+                        cycleSpacingMinutes = iobCobCalculator.ads.detectedCadenceMinutes
                     ),
                     aapsLogger = aapsLogger
                 )
@@ -2717,6 +2913,25 @@ open class OpenAPSBoostPlugin @Inject constructor(
                     )
                 }
 
+                // 2026-07-30 auto-config breadcrumb, replayed EVERY cycle so it reaches Nightscout and
+                // boost_decisions.reason_text. Written by the V5 onboarding path (see
+                // StringKey.ApsBoostV5AutoConfigSummary); read-only here. Empty = the onboarding path has
+                // not reached a decision yet on this install. Display-only, never consulted for dosing.
+                preferences.get(StringKey.ApsBoostV5AutoConfigSummary).let { acs ->
+                    if (acs.isNotEmpty()) it.reason.append("autocfg=$acs; ")
+                }
+                // 2026-08-03 periodic re-derivation breadcrumb, same contract: replayed EVERY cycle
+                // so Nightscout and boost_decisions always show the CURRENT auto-config state, not
+                // just the one cycle in seven when the re-derivation actually ran. Written by
+                // OpenAPSBoostV5Plugin.maybeRedrive; display-only, never consulted for dosing.
+                preferences.get(StringKey.ApsBoostV5RedriveSummary).let { rds ->
+                    if (rds.isNotEmpty()) it.reason.append("autordv=$rds; ")
+                }
+                // 2026-07-30 install-time history-gap breadcrumb, same contract (see BoostHistorySync).
+                // Empty = adequate local history, so nothing to say — the common case writes nothing.
+                preferences.get(StringKey.ApsBoostHistorySyncSummary).let { hss ->
+                    if (hss.isNotEmpty()) it.reason.append("histsync=$hss; ")
+                }
                 it.reason.append("sleep=${sleepResult.newState.state}")
                 if (agg.sleepStartMinAvg != null) {
                     it.reason.append(" learned=${formatClockMin(agg.sleepStartMinAvg!!)}→${formatClockMin(agg.wakeMinAvg ?: 0)}/${agg.sessionCount}d")
@@ -3348,6 +3563,7 @@ open class OpenAPSBoostPlugin @Inject constructor(
                 addPreference(AdaptiveSwitchPreference(ctx = context, booleanKey = BooleanKey.ApsUseSmbAfterCarbs, summary = R.string.enable_smb_after_carbs_summary, title = R.string.enable_smb_after_carbs))
                 if (includeEngineEssentials) addPreference(AdaptiveSwitchPreference(ctx = context, booleanKey = BooleanKey.ApsUseUam, summary = R.string.enable_uam_summary, title = R.string.enable_uam))
                 addPreference(AdaptiveIntPreference(ctx = context, intKey = IntKey.ApsMaxSmbFrequency, title = R.string.smb_interval_summary))
+                addPreference(AdaptiveSwitchPreference(ctx = context, booleanKey = BooleanKey.ApsLoopAtNativeCadence, summary = R.string.loop_native_cadence_summary, title = R.string.loop_native_cadence_title))
                 addPreference(AdaptiveIntPreference(ctx = context, intKey = IntKey.ApsMaxMinutesOfBasalToLimitSmb, title = R.string.smb_max_minutes_summary))
                 addPreference(AdaptiveIntPreference(ctx = context, intKey = IntKey.ApsUamMaxMinutesOfBasalToLimitSmb, dialogMessage = R.string.uam_smb_max_minutes, title = R.string.uam_smb_max_minutes_summary))
                 addPreference(AdaptiveIntPreference(ctx = context, intKey = IntKey.ApsCarbsRequestThreshold, dialogMessage = R.string.carbs_req_threshold_summary, title = R.string.carbs_req_threshold))
@@ -3381,6 +3597,14 @@ open class OpenAPSBoostPlugin @Inject constructor(
                     )
                 )
                 addPreference(AdaptiveSwitchPreference(ctx = context, booleanKey = BooleanKey.ApsAlwaysUseShortDeltas, summary = R.string.always_use_short_avg_summary, title = R.string.always_use_short_avg))
+                addPreference(
+                    AdaptiveSwitchPreference(
+                        ctx = context,
+                        booleanKey = BooleanKey.ApsBoostPostRescueTightRampTrial,
+                        summary = R.string.boost_postrescue_tight_ramp_trial_summary,
+                        title = R.string.boost_postrescue_tight_ramp_trial
+                    )
+                )
                 addPreference(AdaptiveDoublePreference(ctx = context, doubleKey = DoubleKey.ApsMaxDailyMultiplier, dialogMessage = R.string.openapsama_max_daily_safety_multiplier_summary, title = R.string.openapsama_max_daily_safety_multiplier))
                 addPreference(
                     AdaptiveDoublePreference(

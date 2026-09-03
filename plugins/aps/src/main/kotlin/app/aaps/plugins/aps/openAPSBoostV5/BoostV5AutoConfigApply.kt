@@ -106,6 +106,13 @@ internal object BoostV5AutoConfigApply {
         DoubleKey.ApsBoostV5ConfirmedCapU,
         DoubleKey.ApsBoostV5CommittedCapU,
         DoubleKey.ApsBoostCumulativeSmbCap60Min
+        // ApsBoostV5PrimerCapU is deliberately NOT here. It was briefly added on 2026-07-30 and then
+        // removed the same day: raise-guarding it meant a hypo-prone user at the 0.0 factory default had
+        // the cap withheld AND marked resolved, so the primer was never provisioned for them at all —
+        // including the retractable temp-basal route that is precisely their SAFE path. Auto-config
+        // RECOMMENDS the temp-basal routing for these users (ApsBoostV5PrimerTbrFallback) and the
+        // recommendation is recorded, but the user override always wins: auto-config may set a default,
+        // it may never make a setting unreachable.
     )
 
     /** The double-valued V5 knobs auto-config manages (stable order). */
@@ -117,7 +124,7 @@ internal object BoostV5AutoConfigApply {
         DoubleKey.ApsBoostCumulativeSmbCap60Min,
         DoubleKey.ApsBoostMaxIob,
         DoubleKey.ApsBoostBolus,
-        DoubleKey.ApsBoostV5PrimerCapU   // 2026-07-20 — NOT in doseCapKeys (routing is the safety, see BoostV5AutoConfig)
+        DoubleKey.ApsBoostV5PrimerCapU   // NOT raise-guarded — safety is the locked TBR delivery, see doseCapKeys
     )
 
     /** [managedDoubleKeys] paired with their suggested values (same stable order). */
@@ -143,7 +150,240 @@ internal object BoostV5AutoConfigApply {
         storedValue != null && factoryDefaults(key).none { abs(storedValue - it) <= DEFAULT_EPS }
 
     /** How a knob was classified by [applyAutoConfig] this run. */
-    enum class Outcome { APPLIED, KEPT_USER_TUNED, SUGGESTED_NOT_APPLIED_TBR }
+    enum class Outcome {
+        APPLIED, KEPT_USER_TUNED, SUGGESTED_NOT_APPLIED_TBR,
+        // periodic re-derivation outcomes (2026-08-03)
+        REDRIVEN,                 // the knob was moved by a scheduled re-derivation
+        INSIDE_DEADBAND,          // move smaller than the measurement error; it accumulates
+        AWAITING_CONFIRMATION,    // quantised knob: a new value must repeat once before it is written
+        BASELINE_RECORDED,        // first sight: where the derivation sits; nothing written
+        RETIRED_USER_EDITED       // the user has changed it since we wrote it — never revisit
+    }
+
+    /**
+     * ── Periodic re-derivation (2026-08-03, rev 2) ─────────────────────────────────────────────
+     *
+     * Tracks how far each knob's DRIVER has moved and applies that movement to whatever the knob is
+     * currently set to — rather than overwriting it with a fresh absolute derivation.
+     *
+     * Why. A user who raised committedCap from a derived 1.24 to 1.8 was expressing a judgement the
+     * formula does not capture. Overwriting it discards that; freezing it means the knob never
+     * tracks anything again. Applying the movement keeps both: if TDD then rises 20%, they go to
+     * 2.16 and their own +45% offset survives.
+     *
+     * The load-bearing property: because the knob is scaled by exactly the ratio the derivation
+     * moved, `current / derived` is INVARIANT across a re-derivation. The user's offset neither
+     * decays nor compounds — only the driver's own movement is tracked. That is also why this
+     * needs no notion of who "owns" a knob, and hence no ownership ledger: nothing is ever
+     * overwritten, so it never matters whether auto-config or the user set the current value.
+     * (rev 1 used an applied-value ledger and was inert on every existing install, because the
+     * ledger could only be populated by the onboarding path, which had already run.)
+     *
+     * Two families, because a ratio is meaningless for a knob with three possible values:
+     *  - RATIO knobs (committedCap, confirmedCap) are U quantities that scale with dose size:
+     *        proposed = current × (derivedNow / baseline)
+     *  - OFFSET knobs (aggression, hypoCaution) are bounded scales stepping by a fixed quantum:
+     *        proposed = current + (derivedNow − baseline)
+     *  - COMPUTED knobs (cumulative60, primerCap) are not tracked at all — they are recomputed from
+     *    the operative per-shot caps exactly as the derivation itself computes them, so they follow
+     *    automatically and can never drift out of step with the caps they bound.
+     *
+     * The baseline is the DERIVED value at the last write, and is only advanced WHEN we write, so
+     * movement suppressed by the deadband or held by the raise-guard accumulates rather than being
+     * lost. On the very first evaluation there is no baseline, so no TRACKED knob is written — the
+     * run records where the derivation currently sits and tracking begins from the next one.
+     *
+     * The COMPUTED knobs are the exception and CAN be written on that first run: they are not
+     * tracked, they are recomputed from the operative caps every time, so if the stored cumulative
+     * cap has drifted out of step with `confirmedCap + 2 x committedCap` it is corrected
+     * immediately. Observed in the field on 2026-08-04: a first run reported ch=2, both of them
+     * computed knobs. That is intended — a budget sized from a cap that no longer applies is the
+     * incoherence the 2026-07-06 migration backtest found — but "the first run changes nothing" is
+     * NOT true, and was stated as such when this shipped.
+     *
+     * Note also that cumulative60 passes through the raise-guard when it increases and primerCap
+     * does NOT, matching the onboarding path: the primer's safety is its delivery routing rather
+     * than a cap.
+     */
+    val REDRIVE_RATIO_KEYS: List<DoubleKey> = listOf(
+        DoubleKey.ApsBoostV5CommittedCapU,
+        DoubleKey.ApsBoostV5ConfirmedCapU
+    )
+
+    val REDRIVE_OFFSET_KEYS: List<DoubleKey> = listOf(
+        DoubleKey.ApsBoostV5Aggression,
+        DoubleKey.ApsBoostV5HypoCaution
+    )
+
+    /** Tracked knobs, in the order they must be processed (caps before the knobs computed from them). */
+    val REDRIVE_KEYS: List<DoubleKey> = REDRIVE_RATIO_KEYS + REDRIVE_OFFSET_KEYS
+
+    /**
+     * Largest single-step change, as a ratio of the current value. Bounds one evaluation's move
+     * when a driver jumps — a pump-site change or a fortnight of illness can shift median TDD
+     * sharply, and a 28-day window carries that in as a step. Clipped movement is NOT lost: on a
+     * write the baseline advances only by the movement actually applied, so the remainder arrives
+     * over subsequent evaluations until the knob reaches its target.
+     */
+    const val REDRIVE_MAX_STEP_RATIO = 0.25
+
+    /**
+     * Minimum move worth writing, per knob — that knob's day-block bootstrap half-width over a
+     * 28-day window (REDRIVE_REPORT.md §4b). Below it the move is inside the noise of measuring it.
+     * OFFSET knobs are absent deliberately: their own rounding is already the filter, and a band
+     * wider than the quantum (hypoCaution: 0.16 vs 0.1) would freeze them below a double step.
+     */
+    val REDRIVE_DEADBAND: Map<DoubleKey, Double> = mapOf(
+        DoubleKey.ApsBoostV5CommittedCapU to 0.07,
+        DoubleKey.ApsBoostV5ConfirmedCapU to 0.47
+    )
+
+    /**
+     * OFFSET knobs get hysteresis instead of a deadband: a new value must be derived twice
+     * consecutively before it is written, so a knob cannot flap across a threshold (cohort user C
+     * flipped aggression 1.0/0.92 across the 4% TBR line depending on the window).
+     */
+    val REDRIVE_CONFIRM_TWICE: Set<DoubleKey> = REDRIVE_OFFSET_KEYS.toSet()
+
+    /** Why a re-derivation did nothing — logged and surfaced so a silent no-op is impossible. */
+    enum class RedriveSkip { NOT_DUE, ONBOARDING_INCOMPLETE, INSUFFICIENT_HISTORY, BASELINE_SEEDED }
+
+    /**
+     * Apply the derivation's MOVEMENT to each tracked knob's current value. See the design note
+     * above: nothing is overwritten, so no ownership is needed and the user's offset is preserved.
+     */
+    fun redrive(
+        suggestion: BoostV5AutoConfig.V5Suggestion,
+        tbrBelow70Pct: Double,
+        timeBelow54Pct: Double,
+        storedValue: (DoubleKey) -> Double?,
+        baselineValue: (DoubleKey) -> Double?,
+        pendingValue: (DoubleKey) -> Double?,
+        put: (DoubleKey, Double) -> Unit,
+        setBaseline: (DoubleKey, Double) -> Unit,
+        setPending: (DoubleKey, Double?) -> Unit
+    ): List<Resolution> {
+        val out = mutableListOf<Resolution>()
+        val raiseGuard = tbrBelow70Pct > TBR_RAISE_GUARD_PCT || timeBelow54Pct >= TBR54_RAISE_GUARD_PCT
+        val derivedFor = managedDoubleKnobs(suggestion).toMap()
+        val operative = mutableMapOf<DoubleKey, Double>()
+        for (k in managedDoubleKeys) operative[k] = storedValue(k) ?: k.defaultValue
+
+        for (key in REDRIVE_KEYS) {
+            val current = operative.getValue(key)
+            val derivedNow = derivedFor.getValue(key)
+            val baseline = baselineValue(key)
+
+            // First sight: record where the derivation sits and change nothing. We track MOVEMENT,
+            // and none has been observed yet.
+            if (baseline == null || baseline <= 0.0) {
+                setBaseline(key, derivedNow)
+                out += Resolution(key, Outcome.BASELINE_RECORDED, derivedNow, current,
+                                  "baseline recorded at $derivedNow; tracking starts next run")
+                continue
+            }
+
+            val rawProposed = if (key in REDRIVE_RATIO_KEYS) current * (derivedNow / baseline)
+                              else current + (derivedNow - baseline)
+            val stepCap = abs(current) * REDRIVE_MAX_STEP_RATIO
+            val bounded = when {
+                rawProposed > current + stepCap -> current + stepCap
+                rawProposed < current - stepCap -> current - stepCap
+                else                            -> rawProposed
+            }
+            val proposed = round2(bounded.coerceIn(key.min, key.max))
+            val delta = proposed - current
+
+            if (abs(delta) <= DEFAULT_EPS) {
+                // Clear any pending confirmation: "twice consecutively" must mean CONSECUTIVELY, or
+                // a knob alternating either side of a threshold accumulates a match across the gap
+                // and eventually writes the flap.
+                setPending(key, null)
+                out += Resolution(key, Outcome.INSIDE_DEADBAND, proposed, current,
+                                  "no movement: derivation $baseline → $derivedNow leaves $current unchanged")
+                continue
+            }
+
+            if (key in REDRIVE_CONFIRM_TWICE) {
+                val pending = pendingValue(key)
+                if (pending == null || abs(pending - proposed) > DEFAULT_EPS) {
+                    setPending(key, proposed)
+                    out += Resolution(key, Outcome.AWAITING_CONFIRMATION, proposed, current,
+                                      "held for confirmation: $current → $proposed must repeat next run")
+                    continue
+                }
+            } else {
+                val band = REDRIVE_DEADBAND[key] ?: 0.0
+                if (abs(delta) <= band) {
+                    // Baseline deliberately NOT advanced — the movement accumulates for next time.
+                    out += Resolution(key, Outcome.INSIDE_DEADBAND, proposed, current,
+                                      "no change: move ${round2(delta)} within the ±$band noise band (accumulating)")
+                    continue
+                }
+            }
+
+            // hypoCaution RISING is a tightening; for the caps a rise is a loosening.
+            val loosening = if (key == DoubleKey.ApsBoostV5HypoCaution) delta < 0 else delta > 0
+            if (loosening && key in doseCapKeys && raiseGuard) {
+                setPending(key, null)
+                out += Resolution(key, Outcome.SUGGESTED_NOT_APPLIED_TBR, proposed, current,
+                                  "raise held: $current → $proposed; TBR<70=$tbrBelow70Pct% <54=$timeBelow54Pct%")
+                continue
+            }
+
+            put(key, proposed)
+            // Advance the baseline by the movement ACTUALLY APPLIED, not by the movement derived.
+            // When the step cap clips a large move, advancing to derivedNow here would DISCARD the
+            // remainder and strand the knob permanently short of its target — e.g. an insulin
+            // concentration change that doubles TDD-in-units would move a cap by +25% once and then
+            // stop, ~40% below where it belongs. Advancing proportionally leaves the residual in
+            // place, so it arrives over subsequent evaluations. Unclipped moves are unaffected:
+            // proposed/current == derivedNow/baseline, so this reduces to derivedNow exactly.
+            val appliedBaseline =
+                if (key in REDRIVE_RATIO_KEYS) {
+                    if (abs(current) > DEFAULT_EPS) baseline * (proposed / current) else derivedNow
+                } else baseline + (proposed - current)
+            setBaseline(key, appliedBaseline)
+            setPending(key, null)
+            operative[key] = proposed
+            out += Resolution(key, Outcome.REDRIVEN, proposed, proposed,
+                              "tracked $current → $proposed (derivation moved $baseline → $derivedNow)")
+        }
+
+        // COMPUTED knobs follow the operative caps, exactly as the derivation computes them.
+        val cum = DoubleKey.ApsBoostCumulativeSmbCap60Min
+        val curCum = operative.getValue(cum)
+        val newCum = BoostV5AutoConfig.cumulativeCap60Min(
+            operative.getValue(DoubleKey.ApsBoostV5ConfirmedCapU),
+            operative.getValue(DoubleKey.ApsBoostV5CommittedCapU))
+        if (abs(newCum - curCum) > DEFAULT_EPS) {
+            if (newCum > curCum && raiseGuard) {
+                out += Resolution(cum, Outcome.SUGGESTED_NOT_APPLIED_TBR, newCum, curCum,
+                                  "raise held: $curCum → $newCum; TBR<70=$tbrBelow70Pct%")
+            } else {
+                put(cum, newCum)
+                out += Resolution(cum, Outcome.REDRIVEN, newCum, newCum,
+                                  "recomputed $curCum → $newCum from the operative caps")
+            }
+        }
+        // primerCap is a fraction of committedCap; take the fraction from the derivation so the
+        // hypo-prone / well-controlled policy is never duplicated here.
+        val primer = DoubleKey.ApsBoostV5PrimerCapU
+        if (suggestion.committedCapU > 0.0) {
+            val frac = suggestion.primerCapU / suggestion.committedCapU
+            val curPrimer = operative.getValue(primer)
+            val newPrimer = round2((operative.getValue(DoubleKey.ApsBoostV5CommittedCapU) * frac)
+                                       .coerceIn(primer.min, primer.max))
+            if (abs(newPrimer - curPrimer) > 0.056) {
+                put(primer, newPrimer)
+                out += Resolution(primer, Outcome.REDRIVEN, newPrimer, newPrimer,
+                                  "recomputed $curPrimer → $newPrimer from committedCap")
+            }
+        }
+        return out
+    }
+
+    private fun round2(x: Double) = Math.round(x * 100.0) / 100.0
 
     /**
      * Per-knob classification record. [suggestedValue] is the final derived value for the knob
@@ -238,9 +478,10 @@ internal object BoostV5AutoConfigApply {
         )
         resolve(DoubleKey.ApsBoostMaxIob, suggestion.maxIobU)
         resolve(DoubleKey.ApsBoostBolus, suggestion.bolusCapU)
-        // 2026-07-20 V1-acceleration primer cap. NOT in doseCapKeys, so the raise-guard does not block
-        // it — the bolus-vs-temp-basal routing is the safety differentiator, and a tbr-routed
-        // (non-well-controlled) user still needs a non-zero cap to size the retractable temp-basal.
+        // 2026-07-20 V1-acceleration primer cap. NOT raise-guarded (see doseCapKeys): a hypo-prone user
+        // must still be PROVISIONED a non-zero size, because their recommended delivery route — a
+        // retractable temp basal — needs one. The routing is a recommendation the user may override; an
+        // override is logged at the delivery seam (primerRoute) so it is visible in the data.
         resolve(DoubleKey.ApsBoostV5PrimerCapU, suggestion.primerCapU)
         return resolutions
     }

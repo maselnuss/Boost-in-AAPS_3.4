@@ -158,6 +158,12 @@ data class V5PersistedState(
      *  can see what the timing WOULD have been with it on, without actually turning it on. See
      *  the shadow step() call in [decide]. */
     val aggressiveConfirmShadowHypothesis: MealHypothesisState = MealHypothesisState(),
+    /**
+     * Wall clock of the last mlMealLikelyNullStreak increment. LAST in the list because this
+     * class is constructed positionally in several places and inserting mid-list silently
+     * rebinds arguments, which has bitten twice before. (2026-08-01)
+     */
+    val mlNullStreakLastMs: Long = 0L
 )
 
 /** Full per-cycle V5 output. Every field is reconstructable into the ~6 NS RT fields. */
@@ -219,6 +225,10 @@ data class V5Decision(
      *  never affects dosing — [insulinToDeliver] (the already-capped value) is what's actually
      *  used downstream. → `committedCapShadow=` in OpenAPSBoostPlugin.kt. */
     val rawPrecapU: Double = 0.0,
+    /** 2026-07-30 primer sizing telemetry: "d=<delta>,fR=,fB=,fI=,tgt=" — the three state factors and
+     *  the pre-rounding target. Non-empty whenever the primer GATE opened, including when the sized
+     *  amount rounded to 0, so the shadow can separate "gate never opened" from "sized to nothing". */
+    val primerScaleDebug: String = "",
 )
 
 // ===== 2026-07-20 V1-acceleration early primer (LIVE) — backtesting/scripts/2026-07-v1-acceleration =====
@@ -231,13 +241,45 @@ data class V5Decision(
 internal const val PRIMER_ACCEL_THRESHOLD = 10.0
 /** Primer suppressed unless the 60-min low is at/above this (post-hypo rescue-carb guard; mirrors the fast path). */
 internal const val PRIMER_MIN_RECENT_LOW_MGDL = 80.0
-/** Delivery ceiling as a multiple of the base cap — keeps the scaled primer inside V1's proven
- *  fizzle-safe envelope (V1-era mean 0.47, p95 1.75 U) and bounds the net-off excess to one base. */
-internal const val PRIMER_MAX_MULT = 2.0
-/** Acceleration-magnitude scale denominator: primerScale = 1 + max(0, deltaAccl − threshold)/DENOM,
- *  capped at PRIMER_MAX_MULT. A stronger rise gets a bigger primer; the excess above the base is
- *  netted off the commit-shot (Tim's "scaling makes it larger → netted off"). deltaAccl +30 → 2× base. */
-internal const val PRIMER_ACCEL_SCALE_DENOM = 20.0
+
+// ── 2026-07-30 trigger + sizing rework (backtesting/scripts/2026-07-primer-scaling) ──────────────
+// WHY. deltaAccl is a PERCENTAGE whose denominator floors at 2.0, so once the trace is flat the gate
+// `deltaAccl > 10` reduces to (delta − shortAvgDelta) > 0.2 mg/dL — a fifth of one CGM quantisation
+// step. Measured on 90d/25,766 points: the shipped gate is the WORST of ten candidate detectors
+// (P(real rise) 43.8% vs 28.9% chance) and its magnitude scaling ran BACKWARDS — a flat trace scored
+// deltaAccl 33.5 while a genuine 11 mg/dL/5min rise scored 12.5, so noise was paid ~2× and real
+// meals ~1.1×. The old scale was also SATURATED at its 2× ceiling on 5 of 6 observed live fires,
+// i.e. a constant dressed as a response curve. One live incident: 1.35U on a flat 120 → nadir 68.
+// FIX. delta carries the magnitude; deltaAccl stays only as a cheap shape confirmer; and primerCapU
+// becomes a TRUE CEILING scaled by three state factors in [0,1] instead of a >=1 multiplier.
+
+/** Absolute-rise floor (mg/dL per 5 min). delta>=3 STRICTLY DOMINATES the old ratio gate: same firing
+ *  frequency (25.75 vs 26.70 per 100 cycles) at 52.7% vs 43.8% P(real), while retaining 25 min of
+ *  median lead over the confirm-equivalent point. delta>=5 (V1's UAM-Boost floor) collapses that lead
+ *  to 5 min, which would make the primer redundant with CONFIRMED — hence 3.0, not 5.0. */
+internal const val PRIMER_DELTA_MIN = 3.0
+/** delta at which fRise reaches 1.0 (the primer's full ceiling). 8.0 = the delta at which V6 reached
+ *  CONFIRMED in the 2026-07-28 reference meal, so the ceiling is only paid on a confirm-strength rise. */
+internal const val PRIMER_DELTA_FULL = 8.0
+/** fRise ramp origin — below this there is no rise worth priming. Kept under PRIMER_DELTA_MIN so the
+ *  gate, not the ramp, decides whether to fire; the ramp only decides how much. */
+internal const val PRIMER_DELTA_RAMP_LO = 1.5
+/** fBg lower shoulder: primer suppressed below this BG, full scale by LO+SPAN. Guards the near-target
+ *  case (an observed fire at BG 92 on jitter). NOT a discriminator — at onset a real meal and a flat
+ *  trace look identical in BG — purely a bound on how much can be wrong. */
+internal const val PRIMER_BG_LO = 90.0
+internal const val PRIMER_BG_LO_SPAN = 20.0
+/** fBg upper shoulder: fade to zero from CEIL−FADE to CEIL, so the primer can never add into a
+ *  recovering high-IOB tail (the repeated source of lows; see recovering-highs-smb-rejected). */
+internal const val PRIMER_BG_CEIL = 220.0
+internal const val PRIMER_BG_FADE = 40.0
+
+/** Fixed-decimal rounding for the primer telemetry string — keeps this file dependency-free. */
+private fun rnd(x: Double, dp: Int): Double {
+    var f = 1.0
+    repeat(dp) { f *= 10.0 }
+    return kotlin.math.round(x * f) / f
+}
 /** 2026-07-21 primer-IOB accumulator decay time-constant (min, wall-clock). The cross-session
  *  primer-IOB estimate decays as exp(-Δt/TAU); TAU≈90 approximates rapid-insulin clearance well
  *  enough for the confirm-time net-off (the netting only ever REMOVES insulin, so it's safe-signed). */
@@ -258,7 +300,19 @@ class DetermineBasalBoostV5 @Inject constructor() {
 
         // Phase 1.a — meal_signal_score
         val nextNullStreak =
-            if (inputs.mlMealLikely == null) persisted.mlMealLikelyNullStreak + 1 else 0
+            if (inputs.mlMealLikely == null) {
+                // Count elapsed time rather than invocations, as the meal-state ages already do
+                // via AGE_TICK_MS. ML_MEAL_RENORMALIZE_AFTER_CYCLES=3 is meant to be about 15
+                // minutes of a missing model; unticked it is 3 minutes on a one-minute feed.
+                val tick = inputs.nowMs <= 0L || persisted.mlNullStreakLastMs <= 0L ||
+                    (inputs.nowMs - persisted.mlNullStreakLastMs) >= AGE_TICK_MS
+                if (tick) persisted.mlMealLikelyNullStreak + 1 else persisted.mlMealLikelyNullStreak
+            } else 0
+        val nextNullStreakMs =
+            if (inputs.mlMealLikely == null && inputs.nowMs > 0L &&
+                (persisted.mlNullStreakLastMs <= 0L ||
+                    (inputs.nowMs - persisted.mlNullStreakLastMs) >= AGE_TICK_MS)
+            ) inputs.nowMs else persisted.mlNullStreakLastMs
         val scoreResult = mealSignalScore(
             delta = inputs.delta,
             deltaAccl = inputs.deltaAccl,
@@ -322,6 +376,7 @@ class DetermineBasalBoostV5 @Inject constructor() {
         // Phase 1.b — state machine step
         val newHypothesisState = step(
             current = resetState,
+            nowMs = inputs.nowMs,
             score = scoreResult.score,
             eventualBg = inputs.eventualBg,
             targetBg = inputs.targetBg,
@@ -387,17 +442,32 @@ class DetermineBasalBoostV5 @Inject constructor() {
             primerIobU *= kotlin.math.exp(-dtMin / PRIMER_IOB_TAU_MIN)
         }
         var primerBolusU = 0.0
+        var primerScaleDebug = ""
         if (inputs.primerCapU > 0.0 && primerActiveState == MealHypothesis.OBSERVING && primerAppliedU <= 0.0 &&
-            inputs.deltaAccl > PRIMER_ACCEL_THRESHOLD && inputs.delta > 0.0 &&
+            inputs.delta >= PRIMER_DELTA_MIN && inputs.deltaAccl > PRIMER_ACCEL_THRESHOLD &&
             inputs.recentLowBg >= PRIMER_MIN_RECENT_LOW_MGDL && !inputs.asleep &&
             !inputs.exerciseActive && !inputs.postRescueWindow
         ) {
-            // Scale with acceleration magnitude (stronger rise → bigger primer), capped inside V1's
-            // proven fizzle-safe envelope (≤ 2× base), then clamped to maxIOB headroom and pump-rounded.
-            val primerScale = 1.0 + kotlin.math.max(0.0, (inputs.deltaAccl - PRIMER_ACCEL_THRESHOLD) / PRIMER_ACCEL_SCALE_DENOM)
-            val target = minOf(inputs.primerCapU * primerScale, PRIMER_MAX_MULT * inputs.primerCapU)
+            // State-aware sizing. primerCapU is a TRUE CEILING; three factors in [0,1] scale it down.
+            // fRise DISCRIMINATES (magnitude of the actual rise); fBg and fIob are SUPPRESSORS — they
+            // cannot tell a real onset from jitter (at onset both look flat and benign) and exist only
+            // to bound the cost of being wrong. deltaAccl deliberately does NOT scale: it peaks on flat
+            // traces, so any monotonic function of it re-imports the inversion this fix removes.
+            val fRise = ((inputs.delta - PRIMER_DELTA_RAMP_LO) / (PRIMER_DELTA_FULL - PRIMER_DELTA_RAMP_LO))
+                .coerceIn(0.0, 1.0)
+            val fBg = ((inputs.bg - PRIMER_BG_LO) / PRIMER_BG_LO_SPAN).coerceIn(0.0, 1.0) *
+                ((PRIMER_BG_CEIL - inputs.bg) / PRIMER_BG_FADE).coerceIn(0.0, 1.0)
+            val fIob = if (inputs.maxIob > 0.0) (1.0 - inputs.iob / inputs.maxIob).coerceIn(0.0, 1.0) else 0.0
+            val target = inputs.primerCapU * fRise * fBg * fIob
             var amt = minOf(target, kotlin.math.max(0.0, inputs.maxIob - inputs.iob))
             if (inputs.roundSmbTo > 0.0) amt = kotlin.math.floor(amt / inputs.roundSmbTo + 1e-9) * inputs.roundSmbTo
+            // Re-clamp after rounding: floor(x/step)*step can land a hair ABOVE the target in binary
+            // floating point (0.3/0.05 -> 6.0000000002 -> 0.30000000000000004), which would break the
+            // "primerCapU is a hard ceiling" invariant. Rounding must only ever go down.
+            amt = minOf(amt, target)
+            // Telemetry for the shadow: which factor bound the dose. Emitted even when amt rounds to 0.
+            primerScaleDebug = "d=${rnd(inputs.delta, 1)},fR=${rnd(fRise, 2)},fB=${rnd(fBg, 2)}," +
+                "fI=${rnd(fIob, 2)},tgt=${rnd(target, 3)}"
             if (amt > 0.0) {
                 primerBolusU = amt
                 primerAppliedU = amt
@@ -577,6 +647,7 @@ class DetermineBasalBoostV5 @Inject constructor() {
             newPersistedState = V5PersistedState(
                 mealHypothesis = newHypothesisState,
                 mlMealLikelyNullStreak = nextNullStreak,
+                mlNullStreakLastMs = nextNullStreakMs,
                 lastCycleScore = scoreResult.score,
                 primerAppliedU = primerAppliedU,
                 primerNettingResidualU = primerNettingResidualU,
@@ -594,6 +665,7 @@ class DetermineBasalBoostV5 @Inject constructor() {
             aggressiveConfirmShadowState = aggressiveConfirmShadowState.state,
             aggressiveConfirmShadowAge = aggressiveConfirmShadowState.ageCycles,
             rawPrecapU = velocityScaled,
+            primerScaleDebug = primerScaleDebug,
         )
     }
 }

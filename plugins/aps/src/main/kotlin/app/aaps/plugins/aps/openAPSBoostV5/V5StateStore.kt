@@ -71,6 +71,9 @@ class V5StateStore(private val preferences: Preferences, private val aapsLogger:
             val state = MealHypothesisState(
                 state = MealHypothesis.valueOf(json.getString("mealHypothesis")),
                 ageCycles = json.getInt("mealHypothesisAge"),
+                // 2026-07-30: optional — absent on states written by an older build, which reads as
+                // 0 and simply ticks on the next cycle (same as a fresh state).
+                lastAgeMs = json.optLong("mealHypothesisLastAgeMs", 0L),
                 // 2026-05-15: peak score added to state. Missing in pre-fix state → default 0.0
                 // (next OBSERVING cycle will populate it from the entry score).
                 maxScoreInObserving = json.optDouble("maxScoreInObserving", 0.0),
@@ -132,6 +135,7 @@ class V5StateStore(private val preferences: Preferences, private val aapsLogger:
         val json = JSONObject()
             .put("mealHypothesis", state.mealHypothesis.state.name)
             .put("mealHypothesisAge", state.mealHypothesis.ageCycles)
+            .put("mealHypothesisLastAgeMs", state.mealHypothesis.lastAgeMs)
             .put("maxScoreInObserving", state.mealHypothesis.maxScoreInObserving)
             .put("maxEventualBgOffsetInObserving", state.mealHypothesis.maxEventualBgOffsetInObserving)
             .put("committedInSession", state.mealHypothesis.committedInSession)

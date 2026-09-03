@@ -129,7 +129,10 @@ def classify_low(g, a, b):
     steps = np.nanmax(w.steps_60m.values) if np.isfinite(w.steps_60m.values).any() else 0.0
     iob0 = float(g.iob.values[a]) if np.isfinite(g.iob.values[a]) else 0.0
     recent = float(g.recent_meal_iob.values[a])
-    prior_low = bool(g.low3h.values[a]) if "low3h" in g else False
+    # RESCUE_OVERSHOOT attributes a low's CAUSE, so it needs a BACKWARD antecedent (a prior low that
+    # was rescued and see-sawed back), NOT the forward low3h (which asks "is a low coming?" — that
+    # leaks the outcome and made this bucket near-tautological). Corrected 2026-07-16.
+    prior_low = bool(g.prior_low3h.values[a]) if "prior_low3h" in g else False
     iob_hi = np.isfinite(tdd) and iob0 > IOB_HI_FRAC * tdd
 
     if steps > ACT_STEPS:

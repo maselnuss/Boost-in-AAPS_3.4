@@ -2,6 +2,8 @@
 
 _Boost dosing research note, 2026-07-08. V6 (`boostv5_*`) telemetry, TimescaleDB `oref.boost_decisions`, 8 anonymised users (self + A–H), 2026-02 → 07. ~87k cycles, 1,100 episodes. Reproduce: `residency_attribution.py` → `residency_ml.py` → `residency_chart.py`._
 
+> **⚠️ CORRECTION 2026-07-16 — the RESCUE_OVERSHOOT low-lever was a measurement artifact.** `classify_low` attributed `RESCUE_OVERSHOOT` from `low3h` — a **forward** "low within the next 3h" flag (`v7_common.add_rolling`), which leaks the outcome and made the bucket near-tautological. Fixed to a **backward** antecedent (`prior_low3h` = a low in the *prior* 3h → a genuine recurring/see-saw rescue low). Re-run on data refreshed through 2026-07-13: **RESCUE_OVERSHOOT collapses from POOL 37% / per-user-median 44% → POOL 7% / MEDN 5%**, and that time reallocates almost entirely to **BASAL_DRIFT (POOL 1% → 30%, MEDN 1% → 37%)**. ACTIVITY (~48/36%) and STACKING (~16/17%) are unchanged (they rank ahead of rescue in the if-chain). **The reversed conclusion: after ACTIVITY, the #2 low lever is basal/ISF drift, NOT rescue-overshoot — do not build a rescue-handling lever on this data.** The corrected LOW table and findings below supersede the originals; the `residency_attribution.png` chart is stale (regenerate). Everything HIGH-time is unaffected.
+
 ![attribution](residency_attribution.png)
 
 ## Method
@@ -26,17 +28,20 @@ An LGBM layer (GroupKFold **by user**, so no within-user leakage) then answers *
 
 ## LOW-time attribution (% of each user's <70 minutes)
 
+_Corrected 2026-07-16 (backward `prior_low3h` antecedent; data through 2026-07-13). Original buggy-flag numbers in [brackets] for the two columns that changed._
+
 | user | low% | ACTIVITY | STACKING | RESCUE_OVERSHOOT | BASAL_DRIFT |
 |---|---|---|---|---|---|
-| self | 5.0 | 50 | 24 | 26 | 0 |
-| A | 1.2 | 21 | 11 | 68 | 1 |
-| B | 4.1 | 21 | 23 | 56 | 1 |
-| C | 3.5 | 54 | 21 | 25 | 0 |
-| D | 9.7 | 60 | 8 | 32 | 1 |
-| E | 0.9 | 17 | 3 | 79 | 2 |
-| F | 3.1 | 57 | 11 | 32 | 1 |
-| H | 0.6 | 7 | 36 | 57 | 0 |
-| **COHORT** | — | **47** | 16 | **37** | 1 |
+| self | 5.3 | 50 | 23 | 7 [27] | 20 [0] |
+| A | 1.2 | 20 | 15 | 17 [65] | 49 [1] |
+| B | 3.9 | 22 | 22 | 4 [55] | 52 [1] |
+| C | 4.3 | 57 | 19 | 4 [23] | 20 [0] |
+| D | 8.9 | 61 | 7 | 8 [31] | 24 [1] |
+| E | 1.0 | 19 | 12 | 2 [67] | 67 [2] |
+| F | 3.2 | 59 | 10 | 6 [31] | 25 [1] |
+| H | 0.7 | 4 | 38 | 0 [54] | 58 [4] |
+| **POOL** | — | **48** | 16 | **7** [36] | **30** [1] |
+| **MEDN** | — | **36** | 17 | **5** [43] | **37** [1] |
 
 ## Foreseeability (LGBM, grouped-by-user OOF)
 
@@ -60,17 +65,17 @@ Feature importance corroborates the taxonomy: forward-high is driven by BG, IOB-
 ## Findings
 
 1. **The brake owns a third of all high-time (34%, 14,370 min) — and it's foreseeable (1.5× base).** The single largest TIR-loss mechanism is the composed-multiplier suppression firing on rises the model can already see coming. This directly validates the composed brake-floor work as the **#1 high lever**, and is heaviest for self (47%), F (40%), H (39%), A (38%).
-2. **Low-time is dominated by activity + rescue, not by dosing — but the ranking between them depends on how you aggregate (see the correction below).** The **pooled** cohort shares (minute-weighted across all users) are ACTIVITY 47%, RESCUE_OVERSHOOT 37%, stacking 16%. The **per-user median** shares reverse that: RESCUE_OVERSHOOT **44%** > ACTIVITY **36%**. The pooled figure is driven by two high-activity users (D + self) who hold ~53% of all low-minutes. So: activity vs rescue as the #1 low lever is **cohort-total → activity, typical-user → rescue.** Either way, Boost's *dosing* (stacking, 16%) is not the main low driver — the levers are the exercise protections / Garmin ingest **and** rescue-overshoot handling, with rescue at least as important as activity for the typical user.
+2. **Low-time is dominated by activity + basal/ISF drift, not by dosing** _(corrected 2026-07-16 — the original "activity + rescue" reading was the forward-flag artifact; see the ⚠️ banner)._ Corrected shares: ACTIVITY POOL 48% / MEDN 36%, **BASAL_DRIFT POOL 30% / MEDN 37%**, STACKING 16/17%, RESCUE_OVERSHOOT only 7/5%. So the #1 low lever is ACTIVITY (exercise protections / Garmin ingest), and the **#2 is basal/ISF drift** (overnight + between-meal), not rescue. Boost's *dosing* (stacking 16%) remains a minor low driver, and rescue-overshoot is now minor too.
 3. **Cap-clip / undersized / uncoverable highs are *not* foreseeable 45 min out** (0.5–0.9× base) — sudden meal hits. These need a faster/bigger *response*, not better *prediction*; per-user cap sizing (auto-config) and confirm sizing (V7) are the levers, not anticipation.
 4. **Late-confirm (16%) and dawn/basal (NO_MEAL_HIGH, 2.4× base — most foreseeable of all) are avoidable by timing** — the confirm age-gate/score-ready lever and proactive basal handling.
-5. Roughly **85% of high-time is dosing-mechanism attributable**; ~15% (uncoverable + surprise no-meal) is closer to irreducible. Basal is well-tuned (BASAL_DRIFT = 1% of lows).
+5. Roughly **85% of high-time is dosing-mechanism attributable**; ~15% (uncoverable + surprise no-meal) is closer to irreducible. _(Corrected 2026-07-16: the earlier "basal well-tuned, BASAL_DRIFT = 1% of lows" was the forward-flag artifact — with the backward antecedent BASAL_DRIFT is **30–37%** of lows, i.e. basal/ISF drift is a genuine second low lever, not negligible.)_
 
 ## Lever priority (what this says to work on)
 
 1. **Brake correctness** — 34% of high-time, foreseeable. The composed brake-floor is validated as the top lever. **Caveat:** this is *proximate mechanism, not proven causation* — "the brake was suppressing during the rise" ≠ "the brake was wrong" (some suppression is correct high-IOB restraint). The follow-up is the **brake-correctness audit** (of suppressed-rise cycles, what fraction stayed high vs resolved) to price it.
-2. **Activity → hypo and rescue-overshoot** — jointly the low-time drivers. Per-user median: rescue 44%, activity 36% (pooled reverses to activity 47% / rescue 37% because two high-activity users dominate the minute-pool). Treat rescue-overshoot handling and the Garmin ingest / exercise protections as co-equal top low levers, not activity-first.
+2. **Activity → hypo (#1) and basal/ISF drift (#2)** — the low-time drivers _(corrected 2026-07-16)_. ACTIVITY POOL 48% / MEDN 36%; BASAL_DRIFT POOL 30% / MEDN 37%. Prioritise the Garmin ingest / exercise protections, then a basal/ISF-drift review (overnight + between-meal). Rescue-overshoot (5–7%) is NOT a top lever — the earlier co-equal-with-activity claim was the forward-flag artifact.
 3. **Confirm timing** — 16% high, foreseeable (age-gate / score-ready).
-4. **Rescue-overshoot** — 37% low; a rescue-handling lever.
+4. ~~**Rescue-overshoot** — 37% low; a rescue-handling lever.~~ **RETRACTED 2026-07-16** — the 37% was a forward-flag artifact; corrected to 5–7%. Do not build a rescue-handling lever on this. The reallocated time is **basal/ISF drift** (see #2).
 
 ## Caveats
 

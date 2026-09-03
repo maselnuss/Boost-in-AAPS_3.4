@@ -15,13 +15,22 @@ class ConfigImpl @Inject constructor(
     private val fileListProvider: Lazy<FileListProvider>
 ) : Config {
 
+    private companion object {
+        val FULL_FLAVORS = setOf("full", "fullb", "fullc", "fulld")
+    }
+
+
     override val SUPPORTED_NS_VERSION = 150000 // 15.0.0
-    override val APS = BuildConfig.FLAVOR == "full"
+    // The full application, in any of its instances. fullb and fullc are the same build with a
+    // different application id so that several can coexist on one handset; they are not reduced
+    // variants and must have the loop, or an instance meant to run an arm of a study would quietly
+    // have no algorithm at all.
+    override val APS = BuildConfig.FLAVOR in FULL_FLAVORS
     override val AAPSCLIENT = BuildConfig.FLAVOR == "aapsclient" || BuildConfig.FLAVOR == "aapsclient2"
     override val AAPSCLIENT1 = BuildConfig.FLAVOR == "aapsclient"
     override val AAPSCLIENT2 = BuildConfig.FLAVOR == "aapsclient2"
     override val PUMPCONTROL = BuildConfig.FLAVOR == "pumpcontrol"
-    override val PUMPDRIVERS = BuildConfig.FLAVOR == "full" || BuildConfig.FLAVOR == "pumpcontrol"
+    override val PUMPDRIVERS = BuildConfig.FLAVOR in FULL_FLAVORS || BuildConfig.FLAVOR == "pumpcontrol"
     override val FLAVOR = BuildConfig.FLAVOR
     override val VERSION_NAME = BuildConfig.VERSION_NAME
     override val HEAD = BuildConfig.HEAD

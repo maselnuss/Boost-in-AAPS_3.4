@@ -13,6 +13,8 @@
     <string name="openaps_smb_dynamic_isf">Dynamic ISF</string>
     <string name="openaps_auto_isf">Auto ISF</string>
     <string name="smb_interval_summary">How frequently SMBs will be given in min</string>
+    <string name="loop_native_cadence_title">Loop at sensor cadence</string>
+    <string name="loop_native_cadence_summary">Run the loop on every sensor reading rather than once per five minutes. No effect on a five-minute sensor. On a one-minute sensor this makes the loop run every minute, which also allows more frequent SMBs.</string>
     <string name="resistance_lowers_target_title">Resistance lowers target</string>
     <string name="resistance_lowers_target_summary">When resistance is detected, lower the target glucose</string>
     <string name="sensitivity_raises_target_title">Sensitivity raises target</string>
@@ -94,6 +96,15 @@
     <string name="boost_v5_primer_cap_summary">Fizzle-safe early primer delivered on an accelerating rise during OBSERVING — reclaims V1\'s ~15-min-earlier meal response. Additive up to this base; any velocity-scaled excess is netted off the CONFIRMED commit-shot (move, not add). 0 = OFF. Auto-config derives a per-user value.</string>
     <string name="boost_v5_primer_bolus_mode_title">Force bolus primer</string>
     <string name="boost_v5_primer_bolus_mode_summary">Override: deliver the acceleration primer as a bolus even if auto-config routed you to the retractable temp-basal fallback (for hypo-prone users). Floors and the commit-shot net-off are unaffected. Default OFF (respect auto-config routing).</string>
+    <!-- 2026-08-27 confirm tranche. TEST BUILD ONLY: these three come out of the preference
+         screen before release. The release rule's coefficients are population derived and only the
+         threshold is personal, so auto-config owns them and they are not a per-user setting. -->
+    <string name="boost_v5_confirm_tranche_title">Confirm tranche (test)</string>
+    <string name="boost_v5_confirm_tranche_summary">EXPERIMENTAL — splits the confirm commitment, giving part at the confirming cycle and holding the rest for ten minutes, released only if the rise continues. Can only deliver less insulin than without it, never more. A held remainder that cannot be delivered, because the rolling cumulative cap is spent or the sleep gate is shut, counts as a decision not to release.</string>
+    <string name="boost_v5_tranche_fraction_title">Confirm tranche: fraction given immediately</string>
+    <string name="boost_v5_tranche_fraction_summary">Share of the sized confirm dose delivered at the confirming cycle. The remainder is held. Set to 1.0 to make the tranche inert without switching it off.</string>
+    <string name="boost_v5_tranche_threshold_title">Confirm tranche: release threshold</string>
+    <string name="boost_v5_tranche_threshold_summary">The remainder is released when the rule\'s probability exceeds this. Higher withholds more. The population median is 0.48 and the per-person best runs 0.30 to 0.65.</string>
     <string name="boost_v6_pre_meal_target_title">V6 anticipatory pre-meal target</string>
     <string name="boost_v6_pre_meal_target_summary">EXPERIMENTAL — learns your habitual meal times (from V6 meal commits) and applies a low target shortly before a learned meal so insulin is working when carbs land. Exercise and post-exercise recovery override it. When OFF it runs in SHADOW (logs \"V6 pre-meal WOULD apply\" without changing dosing) so you can verify the learned times first.</string>
     <string name="boost_v6_pre_meal_target_mgdl_title">V6 pre-meal target (mg/dL)</string>
@@ -317,6 +328,8 @@
     <string name="openapsama_link_to_preference_json_doc_txt">Attention!\nNormally you do not have to change these values below. Please CLICK HERE and READ the text and make sure you UNDERSTAND it before change any of these values.</string>
     <string name="openapsama_link_to_preference_json_doc" translatable="false">http://openaps.readthedocs.io/en/latest/docs/walkthrough/phase-3/beyond-low-glucose-suspend.html</string>
     <string name="always_use_short_avg">Always use short average delta instead of simple delta</string>
+    <string name="boost_postrescue_tight_ramp_trial">Post-rescue tight-ramp trial</string>
+    <string name="boost_postrescue_tight_ramp_trial_summary">Pre-registered within-user trial. On randomised treatment days the post-rescue rebound guard is capped at 60% and applies across the whole window instead of switching off above 170 mg/dL. Neither arm can deliver more insulin than the current behaviour. Leave OFF unless you are enrolled.</string>
     <string name="always_use_short_avg_summary">Useful when data from unfiltered sources like xDrip+ gets noisy.</string>
     <string name="openapsama_max_daily_safety_multiplier">Max daily safety multiplier</string>
     <string name="openapsama_current_basal_safety_multiplier">Current basal safety multiplier</string>

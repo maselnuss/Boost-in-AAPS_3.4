@@ -149,6 +149,17 @@ data class RT(
     var boostV7_pLow90: Double? = null,          // p(BG<70 within 90 min) off the regime pool's piecewise-linear CDF at h=90, undosed projection; <5% truncates to 0 (left tail not fitted — report §1). DISPLAY ONLY, never permission
     var boostV7_q50Drift: Double? = null,        // active regime pool's MEDIAN 30-min residual (mg/dL) — the criterion-(b) instrument: quiet-flat cycles must read ≈0 once regime conditioning has debiased the substrate
     var boostV7_pool: String? = null,            // active regime pool + n at h=60, e.g. "quiet_flat(n=812)"; "meal(warming n=42)" below warm threshold (sizer abstains); "excluded" = cycle fits no pool (non-flat non-meal daytime — the unannounced-onset pollution, deliberately dropped)
+    // Volume-weighted dose shadow. Read-only telemetry: the blend it proposes, the projection
+    // behind it and the calibration in force, so the paired estimates a within-person trial
+    // would need accumulate from the first cycle rather than from a later backfill.
+    var boostVwa_blend: Double? = null,          // the proposed blend, U/day; never dosed
+    var boostVwa_projection: Double? = null,     // today's projected total before blending, U/day
+    var boostVwa_expected: Double? = null,       // units the curve expected by now
+    var boostVwa_delivered: Double? = null,      // units actually delivered since the day anchor
+    var boostVwa_dayFraction: Double? = null,    // share of the day the curve says has passed
+    var boostVwa_calibratedTdd: Double? = null,  // the 7-day dose the buckets are scaled against
+    var boostVwa_curveDays: Int? = null,         // days of the participant's own the curve rests on
+    var boostVwa_usedPrevDay: Boolean? = null,   // true where the previous day carried the seam
     var boostV7_innovSensFrozen: Double? = null, // rolling 30-min innovation SUM (mg/dL) with sens FROZEN at profile ISF — Backtest-2 follow-up (adapted variable_sens absorbed the signal, d=0.02). Log-only
 
     // KAIROS Twin SHADOW telemetry (2026-07-18) — a physiological Ensemble-Kalman forecaster

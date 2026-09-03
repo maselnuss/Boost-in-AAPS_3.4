@@ -45,10 +45,11 @@ class V7InnovationTrackerTest {
         assertThat(tracker.onCycle(cycleMs, 2.0, 0.01, sensFrozen = Double.NaN)).isNull()
     }
 
-    @Test fun `multi-invoke in the same 5-min bucket replaces the entry instead of double-counting`() {
+    // Bucket narrowed 5 min -> 1 min (2026-08-01); a re-run of the same cycle still replaces.
+    @Test fun `re-invoking within the same cycle replaces the entry instead of double-counting`() {
         val tracker = V7InnovationTracker()
         tracker.onCycle(0L, 2.0, 0.01, 50.0)
-        val sum = tracker.onCycle(60_000L, 4.0, 0.01, 50.0)!! // same bucket → replaces (4 + 2.5 = 6.5)
+        val sum = tracker.onCycle(20_000L, 4.0, 0.01, 50.0)!! // same bucket → replaces (4 + 2.5 = 6.5)
         assertThat(sum).isWithin(1e-9).of(6.5)
     }
 }

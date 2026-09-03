@@ -42,3 +42,4 @@ CLAUDE.local.md
 # Python bytecode from backtesting scripts
 __pycache__/
 *.pyc
+backtesting/scripts/2026-09-meal-clock/out_merged/

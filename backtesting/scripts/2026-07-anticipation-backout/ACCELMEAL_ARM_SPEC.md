@@ -1,8 +1,9 @@
 # Spec: wire `accelMeal` → `antBackout` ARM (shadow)
 
-**Date:** 2026-07-20 · **Tier: SPECULATIVE** (spec only; nothing measured on-device yet).
-**Status: shadow-first, delivers nothing.** A live version is a dosing change → two-test bar
-→ auto-config-managed. Do not dose on this until the banked economics clear the bar.
+**Date:** 2026-07-20 · **Tier: SPECULATIVE** (the lever is unproven).
+**Status: shadow IMPLEMENTED 2026-07-20 (commit `d8c4fafaee`) — banking arm economics, delivers
+nothing.** A live version is a dosing change → two-test bar → auto-config-managed. Do not dose on
+this until the banked economics below clear the bar. The section "The change" records what was built.
 
 ## Why
 

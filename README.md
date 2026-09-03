@@ -96,8 +96,25 @@ caps and Max IOB first — if a cap or the IOB clamp is what's binding, more Agg
 nothing. The [Tuning Guide](https://tim2000s.github.io/Boost-in-AAPS_3.4/boost_tuning_guide.html)
 shows each dial on a conservative→aggressive spectrum with worked scenarios.
 
-Everything else — the dose caps, the cumulative cap, fast-carb confirm, the opt-in aggression levers,
-DynISF, activity — is [advanced and set for you on install](docs/v6-advanced-settings.md). You
+### Two dose caps you will see referenced
+
+These are not dials you tune day to day, but they are the two limits most often hit, so it helps to
+know what they are when a dose looks smaller than you expected.
+
+| Setting (as named in the app) | Where | Range (default) | What it does |
+|---|---|---|---|
+| **Boost Bolus Cap** | Boost V6 | 0.1–10 U (2.5) | The largest single bolus Boost will give outside the UAM basal-minutes limit below. Auto-config sets it from your own dosing history. With carbs on board Boost may exceed it, up to the greater of this cap or your carbs on board divided by your carb ratio. |
+| **Max minutes of basal to limit SMB to for UAM** | Preferences → SMB settings | 15–120 min (15) | Sets the ceiling on a single microbolus as a number of minutes of your own basal: the limit is your current basal rate times these minutes, divided by 60. At a basal of 0.6 U/h, 15 minutes is a ceiling of 0.15 U. It applies when the loop is dosing on unannounced meals rather than carbs, so it is mostly an overnight limit and does not need to be large. |
+
+The companion setting **Max Minutes of basal to limit SMB to**, on the same screen and with the same
+default of 15 minutes, does the same job for microboluses given when Boost is not the active engine.
+
+The cap is a size and not a rate: it limits any one bolus and says nothing about how often that
+bolus may repeat. Raising it raises every dose the cap was holding down, so change it in small steps
+and watch what follows.
+
+Everything else — the cumulative cap, fast-carb confirm, the opt-in aggression levers, DynISF,
+activity — is [advanced and set for you on install](docs/v6-advanced-settings.md). You
 should rarely need to open that page except to understand a value auto-config chose.
 
 ## Interactive tools

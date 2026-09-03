@@ -360,6 +360,47 @@ class BoostV5AutoConfigTest {
         assertThat(f.store[DoubleKey.ApsBoostCumulativeSmbCap60Min]).isNotEqualTo(s.cumulativeSmbCap60MinU)
     }
 
+    // ── 2026-07-30 primer ceiling: self-scaling clamp + raise-guard ──
+
+    @Test fun `primer ceiling is not clipped by a flat constant - scales with committedCap`() {
+        // A well-controlled user with a large commit-shot used to be cut to the old flat 0.9 clamp.
+        // The clamp is now committedCapU itself, so the derived value is frac x committedCapU intact.
+        val s = BoostV5AutoConfig.compute(profile())!!
+        assertThat(s.primerCapU).isGreaterThan(0.0)
+        assertThat(s.primerCapU).isAtMost(s.committedCapU)          // the invariant: <= one commit-shot
+        assertThat(s.primerCapU).isAtMost(DoubleKey.ApsBoostV5PrimerCapU.max)
+    }
+
+    @Test fun `primer ceiling max allows more than the old 1_0 limit`() {
+        // Declared range must not clip a high-need user; 2.5 matches the committed-cap max.
+        assertThat(DoubleKey.ApsBoostV5PrimerCapU.max).isEqualTo(2.5)
+        assertThat(DoubleKey.ApsBoostV5PrimerCapU.defaultValue).isEqualTo(0.0)   // still off by default
+    }
+
+    @Test fun `hypo-prone user IS provisioned a primer ceiling - it must not be raise-guarded away`() {
+        // 2026-07-30: PrimerCapU is deliberately NOT in doseCapKeys. Guarding it meant a hypo-prone
+        // user at the 0.0 factory default got NO primer at all — including the retractable temp-basal
+        // route that is their safe path. The size must be provisioned; the delivery is what's locked.
+        val s = BoostV5AutoConfig.compute(profile(tbr70 = 8.0, sev54 = 2.0))!!
+        val f = FakeStore()
+        val res = f.apply(s, tbr = 8.0, sev54 = 2.0)
+        assertThat(s.primerCapU).isGreaterThan(0.0)
+        assertThat(res.appliedKeys()).contains(DoubleKey.ApsBoostV5PrimerCapU)
+        assertThat(f.store[DoubleKey.ApsBoostV5PrimerCapU]!!).isGreaterThan(0.0)
+        // ...and the raise-guard still holds the REAL dose caps for the same user.
+        assertThat(res.single { it.key == DoubleKey.ApsBoostV5CommittedCapU }.outcome)
+            .isEqualTo(BoostV5AutoConfigApply.Outcome.SUGGESTED_NOT_APPLIED_TBR)
+    }
+
+    @Test fun `hypo-prone user is RECOMMENDED temp-basal routing, well-controlled gets bolus`() {
+        // Auto-config only sets the routing DEFAULT. It must never be a lockout — the user override
+        // (ApsBoostV5PrimerBolusMode) always wins at the delivery seam.
+        val hypoProne = BoostV5AutoConfig.compute(profile(tbr70 = 8.0, sev54 = 2.0))!!
+        assertThat(hypoProne.primerTbrFallback).isTrue()
+        val wellControlled = BoostV5AutoConfig.compute(profile(tbr70 = 0.5, sev54 = 0.1))!!
+        assertThat(wellControlled.primerTbrFallback).isFalse()
+    }
+
     // ── TBR raise-guard on dose caps (2026-07-06 amendment #5, cohort user B) ──
 
     @Test fun `dose-cap RAISE with elevated TBR is held as a suggestion, not applied`() {

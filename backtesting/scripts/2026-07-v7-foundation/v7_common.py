@@ -84,10 +84,14 @@ def load(users=USERS, v6_only=True):
 
 
 def add_rolling(df):
-    """min45 (post-rescue window input) and low<70-within-3h forward flag."""
+    """min45 (post-rescue window input); low3h = low<70 within the NEXT 3h (forward, a hypo-OUTCOME
+    flag — correct for brake_audit/activity_hypo); prior_low3h = low<70 within the PRIOR 3h (backward,
+    a hypo-ANTECEDENT flag — use this to attribute a low's CAUSE, e.g. a recurring rescue-overshoot low;
+    the forward flag must NOT be used for causal attribution, that leaks the outcome)."""
     n = len(df)
     min45 = np.full(n, np.nan)
     low3h = np.zeros(n, bool)
+    prior_low3h = np.zeros(n, bool)
     for _, g in df.groupby("user_id", sort=False):
         ts = g.ts_epoch.values; bg = g.bg.values; idx = g.index.values; m = len(g)
         j = 0
@@ -100,8 +104,14 @@ def add_rolling(df):
             while k < m and ts[k] - ts[i] <= 10800:
                 k += 1
             low3h[idx[i]] = (bg[i + 1:k] < 70).any()
+        lo = 0
+        for i in range(m):
+            while ts[i] - ts[lo] > 10800:      # 3h backward window
+                lo += 1
+            prior_low3h[idx[i]] = (bg[lo:i] < 70).any()   # [lo:i] excludes i itself → strictly prior
     df["min45"] = min45
     df["low3h"] = low3h
+    df["prior_low3h"] = prior_low3h
     return df
 
 

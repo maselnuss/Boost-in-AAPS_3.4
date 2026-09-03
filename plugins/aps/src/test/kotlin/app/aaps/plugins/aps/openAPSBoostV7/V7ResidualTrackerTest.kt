@@ -166,16 +166,33 @@ class V7ResidualTrackerTest {
 
     // ── Multi-invoke + gap behaviour ────────────────────────────────────────────────────────────
 
-    @Test fun `multi-invoke in the same 5-min bucket dedups to a single projection`() {
+    // The dedup bucket narrowed from 5 min to 1 min on 2026-08-01: at 5 min a one-minute loop
+    // had four of every five entries silently replaced. It still collapses a re-run of the SAME
+    // cycle, which is all it was ever for, so the gap here is sub-cycle rather than a minute.
+    @Test fun `re-invoking within the same cycle dedups to a single projection`() {
         val tracker = V7ResidualTracker()
         tracker.onCycle(0L, 100.0, proj(100.0, -2.0), V7Regime.MEAL)
-        tracker.onCycle(60_000L, 101.0, proj(101.0, -2.0), V7Regime.MEAL)  // same bucket → replaces
+        tracker.onCycle(20_000L, 101.0, proj(101.0, -2.0), V7Regime.MEAL)  // same bucket → replaces
         var t = cycleMs
         repeat(8) {
             tracker.onCycle(t, 100.0, proj(100.0, null), null)
             t += cycleMs
         }
         assertThat(tracker.count(V7Regime.MEAL, 30)).isEqualTo(1)
+    }
+
+    @Test fun `two cycles a minute apart are kept as distinct entries`() {
+        // The behaviour the narrowing exists to restore: on a one-minute feed these are two real
+        // cycles, and before the change the second silently replaced the first.
+        val tracker = V7ResidualTracker()
+        tracker.onCycle(0L, 100.0, proj(100.0, -2.0), V7Regime.MEAL)
+        tracker.onCycle(60_000L, 101.0, proj(101.0, -2.0), V7Regime.MEAL)
+        var t = cycleMs
+        repeat(8) {
+            tracker.onCycle(t, 100.0, proj(100.0, null), null)
+            t += cycleMs
+        }
+        assertThat(tracker.count(V7Regime.MEAL, 30)).isEqualTo(2)
     }
 
     @Test fun `a missed maturation window (data gap) yields no sample for that horizon only`() {

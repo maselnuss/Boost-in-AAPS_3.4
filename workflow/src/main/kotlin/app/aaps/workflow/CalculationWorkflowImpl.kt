@@ -119,6 +119,32 @@ class CalculationWorkflowImpl @Inject constructor(
                         .build()
             )
             .then(OneTimeWorkRequest.Builder(UpdateIobCobSensWorker::class.java).build())
+            // The loop runs here, ahead of anything that exists to draw a picture.
+            //
+            // The chain is strictly serial, so whatever precedes the loop delays it. Everything the
+            // loop needs is already done by this point: LoadBgDataWorker built the glucose series and
+            // IobCobOref1Worker the insulin and carbohydrate state. What used to sit between this
+            // point and the loop was PrepareIobAutosensGraphDataWorker, which builds the plotted
+            // series for the IOB and autosens charts and which the loop never reads.
+            //
+            // On a handset carrying several instances that stage measured eleven seconds at the
+            // median and forty nine at worst, against a fifth of a second for the insulin
+            // calculation itself, so dosing was queued behind chart preparation and on a one minute
+            // feed the next reading arrived before the loop had run. Moving the loop ahead of it
+            // changes nothing about what either stage computes.
+            .then(
+                runIf = job == MAIN_CALCULATION,
+                OneTimeWorkRequest.Builder(InvokeLoopWorker::class.java)
+                    .setInputData(dataWorkerStorage.storeInputData(InvokeLoopWorker.InvokeLoopData(cause)))
+                    .build()
+            )
+            // The widget carries the current IOB, which UpdateIobCobSensWorker has already published.
+            // It does not need the graph series either, and on an instance whose screen is never
+            // opened the widget is the only reason the rest of this chain runs at all.
+            .then(
+                runIf = job == MAIN_CALCULATION,
+                OneTimeWorkRequest.Builder(UpdateWidgetWorker::class.java).build()
+            )
             .then(
                 OneTimeWorkRequest.Builder(PrepareIobAutosensGraphDataWorker::class.java)
                     .setInputData(dataWorkerStorage.storeInputData(PrepareIobAutosensGraphDataWorker.PrepareIobAutosensData(iobCobCalculator, overviewData)))
@@ -129,16 +155,6 @@ class CalculationWorkflowImpl @Inject constructor(
                 OneTimeWorkRequest.Builder(UpdateGraphWorker::class.java)
                     .setInputData(Data.Builder().putString(JOB, job).putInt(PASS, CalculationWorkflow.ProgressData.DRAW_IOB.pass).build())
                     .build()
-            )
-            .then(
-                runIf = job == MAIN_CALCULATION,
-                OneTimeWorkRequest.Builder(InvokeLoopWorker::class.java)
-                    .setInputData(dataWorkerStorage.storeInputData(InvokeLoopWorker.InvokeLoopData(cause)))
-                    .build()
-            )
-            .then(
-                runIf = job == MAIN_CALCULATION,
-                OneTimeWorkRequest.Builder(UpdateWidgetWorker::class.java).build()
             )
             .then(
                 runIf = job == MAIN_CALCULATION,
