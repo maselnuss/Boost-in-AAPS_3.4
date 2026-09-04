@@ -130,12 +130,17 @@ public class BarGraphSeries<E extends DataPointInterface> extends BaseSeries<E> 
         // Iterate through all bar graph series
         // so we know how wide to make our bar,
         // and in what position to put it in
+        // 2026-08-29 fix: graphView.getSeries() only ever returns the PRIMARY series list, never
+        // the second-scale one. A BarGraphSeries drawn with isSecondScale=true would never find
+        // itself in that loop, numValues would stay 0, and drawing would abort below before a
+        // single bar was ever painted — regardless of how much real data it had. Scan whichever
+        // list this draw pass is actually using instead.
         int numBarSeries = 0;
         int currentSeriesOrder = 0;
         int numValues = 0;
         boolean isCurrentSeries;
         SortedSet<Double> xVals = new TreeSet<Double>();
-        for (Series inspectedSeries : graphView.getSeries()) {
+        for (Series inspectedSeries : (isSecondScale ? graphView.getSecondScale().getSeries() : graphView.getSeries())) {
             if (inspectedSeries instanceof BarGraphSeries) {
                 isCurrentSeries = (inspectedSeries == this);
                 if (isCurrentSeries) {
