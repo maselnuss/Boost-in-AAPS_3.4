@@ -17,7 +17,6 @@ import app.aaps.core.graph.data.GlucoseValueDataPoint
 import app.aaps.core.graph.data.LineGraphSeries
 import app.aaps.core.graph.data.PointsWithLabelGraphSeries
 import app.aaps.core.graph.data.ScaledDataPoint
-import app.aaps.core.graph.data.TimeAsXAxisLabelFormatter
 import app.aaps.core.interfaces.overview.OverviewData
 import app.aaps.core.interfaces.profile.ProfileFunction
 import app.aaps.core.interfaces.profile.ProfileUtil
@@ -26,9 +25,11 @@ import app.aaps.core.interfaces.utils.Round
 import app.aaps.core.keys.UnitDoubleKey
 import app.aaps.core.keys.interfaces.Preferences
 import app.aaps.core.ui.toast.ToastUtils
+import com.jjoe64.graphview.DefaultLabelFormatter
 import com.jjoe64.graphview.GraphView
 import com.jjoe64.graphview.series.DataPoint
 import com.jjoe64.graphview.series.Series
+import java.util.Locale
 import javax.inject.Inject
 import kotlin.math.abs
 import kotlin.math.max
@@ -106,6 +107,13 @@ class BoostV2GraphData @Inject constructor(
          *  applyV2Theme() re-applies this to the BG & IOB graphs on every refresh, so this
          *  constant (not the one-time onViewCreated setup) is the effective colour. */
         val LABEL_COLOR = Color.parseColor("#aaaaaa")
+
+        /** See [formatAxis]'s comment. Above this span, X-axis labels always round to the nearest
+         *  whole hour (never print minutes); at or below it, per-tick 5-min rounding is used so the
+         *  "3h" range still gets its intentional half-hour labels. Picked well above the 3h range's
+         *  own max span (3h history + capped ≤1h prediction = 4h) and well below the next built-in
+         *  option (6h) — 5h leaves a full hour of margin on both sides. */
+        const val ROUND_TO_HOUR_THRESHOLD_MS = 5 * 3_600_000L
     }
 
     // ── Internal state (mirrors GraphData) ───────────────────────────────
@@ -129,13 +137,33 @@ class BoostV2GraphData @Inject constructor(
     }
 
     fun addBgReadings(addPredictions: Boolean, context: Context?) {
-        maxY = if (overviewData.bgReadingsArray.isEmpty()) {
+        val bgSeries = overviewData.bgReadingGraphSeries as PointsWithLabelGraphSeries<DataPointWithLabelInterface>
+        // overviewData.maxBgValue is computed by a shared background worker (PrepareBgDataWorker)
+        // whose own fromTime/toTime window is not guaranteed to already be refreshed to match a
+        // just-changed zoom level — the axis can then reflect a wider/stale window's peak instead of
+        // what is actually on screen (the "3h" range's narrowness makes the worker's refresh lag
+        // visible far more often than the wider built-in options do). Recompute the max locally from
+        // the ACTUAL series points bounded to the current viewport instead of trusting a value that
+        // may not correspond to the window really being shown.
+        val windowed = bgSeries.getValues(overviewData.fromTime.toDouble(), overviewData.endTime.toDouble())
+        var realMax = Double.MIN_VALUE
+        while (windowed.hasNext()) {
+            val v = windowed.next() ?: break
+            if (v.getY() > realMax) realMax = v.getY()
+        }
+        // Same margin convention as PrepareBgDataWorker.addUpperChartMargin, plus the same
+        // "always show at least the configured High line" floor via OverviewHighMark.
+        val highMark = preferences.get(UnitDoubleKey.OverviewHighMark)
+        maxY = if (realMax == Double.MIN_VALUE) {
             if (units == GlucoseUnit.MGDL) 180.0 else 10.0
-        } else overviewData.maxBgValue
+        } else {
+            val withHighMark = max(realMax, highMark)
+            if (units == GlucoseUnit.MGDL) Round.roundTo(withHighMark, 40.0) + 80 else Round.roundTo(withHighMark, 2.0) + 4
+        }
         minY = 0.0
-        addSeries(overviewData.bgReadingGraphSeries as PointsWithLabelGraphSeries<DataPointWithLabelInterface>)
+        addSeries(bgSeries)
         if (addPredictions) addSeries(overviewData.predictionsGraphSeries as PointsWithLabelGraphSeries<DataPointWithLabelInterface>)
-        (overviewData.bgReadingGraphSeries as PointsWithLabelGraphSeries<DataPointWithLabelInterface>).setOnDataPointTapListener { _, dataPoint ->
+        bgSeries.setOnDataPointTapListener { _, dataPoint ->
             if (dataPoint is GlucoseValueDataPoint) ToastUtils.infoToast(context, dataPoint.label)
         }
     }
@@ -494,8 +522,68 @@ class BoostV2GraphData @Inject constructor(
         graph.viewport.setMaxX(endTime.toDouble())
         graph.viewport.setMinX(fromTime.toDouble())
         graph.viewport.isXAxisBoundsManual = true
-        graph.gridLabelRenderer.labelFormatter = TimeAsXAxisLabelFormatter("HH")
+        // The "3h" range option produces duplicate-looking hour labels ("12 12 13 13 14 14 15"):
+        // numHorizontalLabels=7 and the plain "HH" formatter both assume the widest built-in options
+        // (6h+), where 7 labels are 51+ min apart and hour collisions are rare. At 3h/7 labels
+        // (~26 min apart), same-hour ticks are the common case, and "HH"-only can't tell them apart.
+        // HourMinuteXAxisFormatter below picks the pattern per TICK instead of once for the whole
+        // axis: minutes only when a tick doesn't land on the hour. Since fromTime/toTime are
+        // hour-aligned (OverviewDataImpl.initRange()), 3h/7 ticks alternate exactly on the hour and
+        // half-hour, printing "20 20:30 21 21:30 ..." instead of an all-"HH" collision or an
+        // all-"HH:mm" wall of text.
+        //
+        // fromTime/endTime are also not always stamped from one shared "now": initRange() sets an
+        // initial toTime, then PreparePredictionsWorker (its own independent "now") can overwrite
+        // fromTime/toTime/endTime again once predictions are available. If the two workers' "now"
+        // ticks into a different minute, the visible span stops being a clean multiple of an hour,
+        // so even a 6h+ window can occasionally show a stray minute (e.g. "11:05") among otherwise-
+        // clean hour labels — reproduced live, the same 6h view rendered cleanly again once both
+        // workers' "now" happened to agree. Only the narrow "3h" range actually needs half-hour
+        // precision; every wider built-in option only ever wants whole hours, so for any window
+        // above ROUND_TO_HOUR_THRESHOLD_MS the formatter always rounds to the nearest HOUR — this
+        // can never print a stray minute there, regardless of future worker-timing skew, without
+        // touching fromTime/endTime or the plotted data at all.
+        graph.gridLabelRenderer.labelFormatter = HourMinuteXAxisFormatter(roundToWholeHour = endTime - fromTime > ROUND_TO_HOUR_THRESHOLD_MS)
         graph.gridLabelRenderer.numHorizontalLabels = 7
+    }
+
+    /**
+     * X-axis label formatter that shows just the hour ("20") when a tick lands on (or within 2.5
+     * min of, to absorb OverviewDataImpl's own ~100s rounding epsilon on toTime) a whole hour, and
+     * "HH:mm" ("20:30") otherwise — see [formatAxis]'s comment for why. Extends the same
+     * `DefaultLabelFormatter` base as the stock `TimeAsXAxisLabelFormatter`, just picks the pattern
+     * per tick instead of once for the whole axis. Rounds the DISPLAYED value to the nearest 5 min
+     * too (not just the hour-check), so a tick a few seconds off a clean mark still reads as one.
+     *
+     * @param roundToWholeHour when true (windows wider than [ROUND_TO_HOUR_THRESHOLD_MS], i.e. every
+     *   built-in range except "3h"), rounds to the nearest HOUR instead of nearest 5 min, so it can
+     *   only ever print a bare hour — see [formatAxis]'s comment for why this is needed even though
+     *   wide windows "should" already land on whole hours.
+     */
+    private class HourMinuteXAxisFormatter(private val roundToWholeHour: Boolean) : DefaultLabelFormatter() {
+        private val hourFormat = java.text.SimpleDateFormat("HH", Locale.getDefault())
+        private val hourMinuteFormat = java.text.SimpleDateFormat("HH:mm", Locale.getDefault())
+        override fun formatLabel(value: Double, isValueX: Boolean): String {
+            if (!isValueX) {
+                // Same guard as the stock TimeAsXAxisLabelFormatter this replaces — its own comment
+                // documents a real NPE from GridLabelRenderer calling into DefaultLabelFormatter.
+                // formatLabel with isValueX=false at a point where its internal viewport reference
+                // can be null. Never reproduced directly, but the guard is cheap and this class is a
+                // straight swap for that one, so it keeps it.
+                return try {
+                    super.formatLabel(value, false)
+                } catch (ignored: Exception) {
+                    ""
+                }
+            }
+            if (roundToWholeHour) {
+                val roundedMs = Math.round(value / 3_600_000.0) * 3_600_000L // nearest whole hour
+                return hourFormat.format(roundedMs)
+            }
+            val roundedMs = Math.round(value / 300_000.0) * 300_000L // nearest 5 min
+            val cal = java.util.Calendar.getInstance().apply { timeInMillis = roundedMs }
+            return if (cal.get(java.util.Calendar.MINUTE) == 0) hourFormat.format(roundedMs) else hourMinuteFormat.format(roundedMs)
+        }
     }
 
     /**
