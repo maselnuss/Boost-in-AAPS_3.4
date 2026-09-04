@@ -215,24 +215,52 @@ open class OpenAPSBoostV5Plugin @Inject constructor(
     }
 
     private fun scheduleConfigEvaluation() {
-        if (!runCatching { configEvaluationDue() }.getOrDefault(false)) return
+        // 2026-09-04 BUGFIX (found by diagnosing why the tranche-threshold shadow produced nothing
+        // for a whole day): configEvaluationDue() keys on ApsBoostV5AutoConfigLastRedriveMs — the
+        // REDRIVE's clock. We deliberately disabled maybeRedrive(), but an older build (before that
+        // decision) can have stamped that clock, and then this gate stays shut for up to 7 days.
+        // The tranche shadow has its own toggle and its own 6h interval and has nothing to do with
+        // the redrive cadence, so hanging it behind that gate made it dormant on arrival. Each
+        // consumer now decides for itself whether it is due.
+        val configDue = runCatching { configEvaluationDue() }.getOrDefault(false)
+        val trancheDue = runCatching {
+            preferences.getBoostDosing(BooleanKey.ApsBoostTrancheThresholdShadowEnabled) &&
+                dateUtil.now() - lastTrancheThresholdComputeMs >= TRANCHE_SHADOW_INTERVAL_MS
+        }.getOrDefault(false)
+        // Konzept 7 owns a 14-day cadence of its own and is equally unrelated to the redrive clock —
+        // same coupling bug, same fix. Without this the review would ALSO stay dormant behind a shut
+        // gate, silently, which is how it could have missed its next due date entirely.
+        val reviewDue = runCatching {
+            val lastReview = preferences.get(LongNonKey.ApsBoostV5PeriodicReviewLastMs)
+            lastReview == 0L || dateUtil.now() - lastReview >= PERIODIC_REVIEW_INTERVAL_MS
+        }.getOrDefault(false)
+        if (!configDue && !trancheDue && !reviewDue) {
+            // Log only on the DORMANT transition, not every cycle — but log it, because a gate that
+            // closes silently is exactly what cost an afternoon here.
+            if (!configGateReportedDormant) {
+                configGateReportedDormant = true
+                aapsLogger.debug(LTag.APS, "BoostV5 config evaluation dormant: configDue=false, trancheDue=false, reviewDue=false")
+            }
+            return
+        }
+        configGateReportedDormant = false
         if (!configEvaluationRunning.compareAndSet(false, true)) return   // one at a time
         configExecutor.execute {
             try {
-                runCatching { maybeAutoConfigure() }
+                runCatching { if (configDue) maybeAutoConfigure() }
                     .onFailure { aapsLogger.error(LTag.APS, "BoostV5 auto-config failed (non-fatal)", it) }
                 // Konzept 7 (2026-08-26, eigen) — periodische Re-Suggestion MIT Nutzerbestaetigung:
                 // re-derives every managed knob on an interval and surfaces a notification the user
                 // can open to review/apply per item. Writes nothing by itself. Runs here (background,
                 // off the dose path) since the 2026-09-03 upstream merge moved config work here.
-                runCatching { maybePeriodicReview(dateUtil.now()) }
+                runCatching { if (reviewDue) maybePeriodicReview(dateUtil.now()) }
                     .onFailure { aapsLogger.error(LTag.APS, "BoostV5 periodic review failed (non-fatal)", it) }
                 // Tranche-threshold shadow (2026-09-03, user request "die Berechnung direkt
                 // mitlaufen lassen") — replays the release rule over recent confirm episodes and
                 // logs what releaseThreshold SHOULD be. Writes nothing, never touches dosing. Runs
                 // here rather than in runEngine() because it sweeps APS results + BG history, which
                 // must not sit on the dose path. See BoostTrancheThresholdShadow.kt.
-                runCatching { maybeTrancheThresholdShadow(dateUtil.now()) }
+                runCatching { if (trancheDue) maybeTrancheThresholdShadow(dateUtil.now()) }
                     .onFailure { aapsLogger.error(LTag.APS, "BoostV5 tranche-threshold shadow failed (non-fatal)", it) }
                 // maybeRedrive() — upstream's AUTOMATIC re-derivation. DELIBERATELY DISABLED
                 // (2026-09-03 merge, user decision "Variante C"): it writes the very same managed
@@ -328,6 +356,10 @@ open class OpenAPSBoostV5Plugin @Inject constructor(
     // the background executor, consumed once by runShadow() when the live rT exists.
     @Volatile private var pendingTrancheThresholdNsNote: String? = null
     @Volatile private var lastTrancheThresholdComputeMs: Long = 0L
+
+    /** Edge-trigger for the dormancy log in scheduleConfigEvaluation: log the TRANSITION into
+     *  dormant, not every cycle — at 5-minute cadence that would be ~288 identical lines a day. */
+    @Volatile private var configGateReportedDormant: Boolean = false
 
     /** Throttled trailing-14d time-below-63 AND -70 mg/dL, then the fail-closed floor hypo-gate. */
     internal fun composedFloorTbrAllowed(now: Long): Boolean {
@@ -721,7 +753,17 @@ open class OpenAPSBoostV5Plugin @Inject constructor(
         val results = persistenceLayer.getApsResults(since, now)
         // ascending = true: the episode walk below relies on chronological order.
         val bgs = persistenceLayer.getBgReadingsDataFromTimeToTime(since, now, true)
-        if (results.isEmpty() || bgs.size < 2) return
+        // 2026-09-04: this return used to be SILENT. When the shadow produced nothing on the first
+        // real build there was no way to tell "no history" from "crashed" from "never ran" — the
+        // whole diagnosis had to go through logcat and found nothing, because nothing was written.
+        // A return path that explains itself costs one line and saves an hour.
+        if (results.isEmpty() || bgs.size < 2) {
+            aapsLogger.debug(
+                LTag.APS,
+                "Tranche-threshold shadow: no usable history (apsResults=${results.size}, bgReadings=${bgs.size}, window=${TRANCHE_SHADOW_LOOKBACK_MS / 86_400_000}d) — skipping"
+            )
+            return
+        }
 
         val bgTimes = bgs.map { it.timestamp }
         val bgValues = bgs.map { it.value }
@@ -796,7 +838,15 @@ open class OpenAPSBoostV5Plugin @Inject constructor(
         val inEffect = if (preferences.getBoostDosing(BooleanKey.ApsBoostV5ConfirmTranche)) current else null
         val s = BoostTrancheThresholdShadow.computeSuggestion(episodes, current, inEffect)
         if (s == null) {
-            aapsLogger.debug(LTag.APS, "Tranche-threshold shadow: not enough unambiguous episodes yet (${episodes.size} raw)")
+            // The whole funnel, not just the last stage: apsResults -> CONFIRMED cycles -> episodes
+            // that could be reconstructed from BG -> unambiguous ones. Which number collapses says
+            // WHERE it fails (short history / regex miss / BG gaps / genuinely ambiguous outcomes),
+            // and that is exactly what a bare "not enough episodes" could not tell us. (2026-09-04)
+            aapsLogger.debug(
+                LTag.APS,
+                "Tranche-threshold shadow: no suggestion — apsResults=${results.size}, confirms=${confirms.size}, " +
+                    "episodes=${episodes.size}, need>=${BoostTrancheThresholdShadow.MIN_UNAMBIGUOUS_EPISODES} unambiguous"
+            )
             return
         }
         pendingTrancheThresholdNsNote =
@@ -948,7 +998,19 @@ open class OpenAPSBoostV5Plugin @Inject constructor(
             setPadding(dp(24), dp(8), dp(24), dp(8))
         }
 
-        fun row(checkBox: CheckBox, name: String, tunedMarker: String, deltaText: String, deltaColor: Int?, rationale: String) {
+        fun row(
+            checkBox: CheckBox,
+            name: String,
+            tunedMarker: String,
+            deltaText: String,
+            deltaColor: Int?,
+            rationale: String,
+            // 2026-09-04: raise-guard context, own line rather than folded into `rationale`.
+            // The rationale view runs at 13sp/0.7 alpha — deliberately secondary, and a safety note
+            // buried there is a note nobody reads. This renders at full opacity in amber, directly
+            // under the value, so it carries the same weight as the change itself.
+            raiseGuardNote: String? = null,
+        ) {
             val prefix = "$name$tunedMarker: "
             val titleView = TextView(context).apply {
                 text = SpannableString(prefix + deltaText).apply {
@@ -968,6 +1030,17 @@ open class OpenAPSBoostV5Plugin @Inject constructor(
                 orientation = LinearLayout.VERTICAL
                 layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
                 addView(titleView)
+                // Between value and rationale on purpose: it qualifies the CHANGE, not the reasoning.
+                // Amber (Material 700) rather than the red used for a decrease — this is a caution,
+                // not an error, and red here would collide with the delta colouring right above.
+                raiseGuardNote?.let { note ->
+                    addView(TextView(context).apply {
+                        text = "⚠ $note"
+                        textSize = 13f
+                        setTextColor(Color.parseColor("#FF8F00"))
+                        setPadding(0, dp(3), 0, 0)
+                    })
+                }
                 addView(rationaleView)
             }
             val rowLayout = LinearLayout(context).apply {
@@ -997,7 +1070,9 @@ open class OpenAPSBoostV5Plugin @Inject constructor(
                 tunedMarker = if (item.wasUserTuned) " " + rh.gs(R.string.boost_v5_periodic_review_manually_set_marker) else "",
                 deltaText = "${item.currentValue} → ${item.suggestedValue}",
                 deltaColor = deltaColor,
-                rationale = dialogRationale(item.key, item.rationale)
+                rationale = dialogRationale(item.key, item.rationale),
+                // Advisory only — the checkbox stays enabled (see ReviewItem.raiseGuardNote).
+                raiseGuardNote = item.raiseGuardNote,
             )
         }
 

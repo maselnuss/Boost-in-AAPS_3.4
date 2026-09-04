@@ -61,6 +61,37 @@ object BoostV5PeriodicReview {
     private fun surfaceThreshold(key: DoubleKey): Double =
         BoostV5AutoConfigApply.REDRIVE_DEADBAND[key] ?: MIN_ABS_DELTA
 
+    /**
+     * The raise-guard context for one item, or null when it does not apply (2026-09-04).
+     *
+     * Applies only when ALL of: the knob is a dose cap ([BoostV5AutoConfigApply.doseCapKeys] — MaxIob
+     * and the bolus cap are deliberately NOT in that set, their source of truth is another screen),
+     * the move is upward, and trailing hypo exposure is at or over either limit. Thresholds and the
+     * key set are read from upstream, not re-declared — a second copy would drift.
+     *
+     * Returns text rather than a boolean so the caller does not have to re-derive WHY it fired; the
+     * dialog just appends it. Numbers are included because "your exposure is high" is not actionable
+     * while "3.9% against a 4.0% limit" tells the user how close the call is.
+     */
+    private fun raiseGuardNoteFor(
+        key: DoubleKey,
+        current: Double,
+        suggested: Double,
+        p: BoostV5AutoConfig.V1Profile,
+    ): String? {
+        if (key !in BoostV5AutoConfigApply.doseCapKeys) return null
+        if (suggested <= current) return null
+        val overTbr = p.tbrBelow70Pct > BoostV5AutoConfigApply.TBR_RAISE_GUARD_PCT
+        val overSevere = p.timeBelow54Pct >= BoostV5AutoConfigApply.TBR54_RAISE_GUARD_PCT
+        if (!overTbr && !overSevere) return null
+        return "Raises a dose cap while recent low exposure is elevated " +
+            "(<70: ${round1(p.tbrBelow70Pct)}% vs ${BoostV5AutoConfigApply.TBR_RAISE_GUARD_PCT}% limit, " +
+            "<54: ${round1(p.timeBelow54Pct)}% vs ${BoostV5AutoConfigApply.TBR54_RAISE_GUARD_PCT}% limit). " +
+            "Automatic re-derivation would hold this back."
+    }
+
+    private fun round1(v: Double): Double = kotlin.math.round(v * 10.0) / 10.0
+
     data class ReviewItem(
         val key: DoubleKey,
         val currentValue: Double,
@@ -70,7 +101,22 @@ object BoostV5PeriodicReview {
         // every factory default the key ever shipped with — i.e. a human (or the one-shot
         // auto-config) deliberately set it. Surfaced so the review dialog can mark it, NOT used to
         // filter the item out — Konzept 7 re-derives and offers every knob regardless.
-        val wasUserTuned: Boolean
+        val wasUserTuned: Boolean,
+        /**
+         * Non-null only when this item RAISES a dose cap while trailing hypo exposure is at or over
+         * upstream's raise-guard limits (2026-09-04, user request: "nur als Info").
+         *
+         * Upstream's AUTOMATIC re-derivation refuses to write such a raise and only surfaces it
+         * ([BoostV5AutoConfigApply.TBR_RAISE_GUARD_PCT] / [BoostV5AutoConfigApply.TBR54_RAISE_GUARD_PCT],
+         * with the cohort evidence that a raise is the wrong medicine for a TBR-heavy user). Our path
+         * only ever surfaces anyway, so the guard cannot be a refusal here — but without this the user
+         * decides without the context upstream would have acted on. This carries that context into the
+         * dialog instead of dropping it on the floor.
+         *
+         * Deliberately advisory: the item stays checkable and nothing is filtered out. The guard only
+         * stops the decision being an uninformed one.
+         */
+        val raiseGuardNote: String? = null
     )
 
     private fun candidateKnobs(s: BoostV5AutoConfig.V5Suggestion): List<Pair<DoubleKey, Double>> =
@@ -97,7 +143,8 @@ object BoostV5PeriodicReview {
                 currentValue = current,
                 suggestedValue = suggested,
                 rationale = suggestion.rationaleByKey[key] ?: "",
-                wasUserTuned = BoostV5AutoConfigApply.isUserTuned(key, stored)
+                wasUserTuned = BoostV5AutoConfigApply.isUserTuned(key, stored),
+                raiseGuardNote = raiseGuardNoteFor(key, current, suggested, p),
             )
         }
     }
