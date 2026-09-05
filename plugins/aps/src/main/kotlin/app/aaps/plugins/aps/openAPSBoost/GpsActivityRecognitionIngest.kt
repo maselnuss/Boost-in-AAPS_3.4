@@ -48,12 +48,42 @@ class GpsActivityRecognitionIngest @Inject constructor(
 
     data class Transition(val activityType: Int, val entering: Boolean, val atMs: Long)
 
-    /** Every transition seen within the last [RECENT_MS] — read by OpenAPSBoostPlugin's Shadow
-     *  block, written only from [onTransitionEvent]. A `List`, not a single "most recent" slot — an
-     *  exit shortly after an enter must both stay reachable for one shadow-log line, not silently
-     *  overwrite each other. */
-    @Volatile var recentTransitions: List<Transition> = emptyList()
-        private set
+    /**
+     * Backing store — NOT the public read surface, see [recentTransitions]. A `List`, not a single
+     * "most recent" slot — an exit shortly after an enter must both stay reachable for one
+     * shadow-log line, not silently overwrite each other.
+     */
+    @Volatile private var storedTransitions: List<Transition> = emptyList()
+
+    /**
+     * Every transition within the last [RECENT_MS] of [nowMs] — read by OpenAPSBoostPlugin's
+     * Shadow block every cycle.
+     *
+     * 2026-09-05 BUGFIX (real incident: 122 repeated `gpsActivity:` log lines over 9 hours on an
+     * overnight ferry, while the user was asleep and later walking — not cycling for anything
+     * close to that long). Previously this pruned ONLY inside [onTransitionEvent], i.e. only when a
+     * NEW Android callback arrived — confirmed as intended by this class's own pre-existing test
+     * ("events older than the 90min window are pruned ON THE NEXT EVENT"). If no further callback
+     * ever arrives, a stale entry sat here indefinitely. The consumer's own dedup
+     * (`loggedGpsTransitionMs` in OpenAPSBoostPlugin) normally stops that from being re-announced
+     * more than once — but that dedup is a plain instance field, not Dagger-singleton-scoped like
+     * this class, so anything that recreates the OWNING plugin instance without killing the whole
+     * process (AAPS can and does reload/reconstruct plugins) resets it while this class's state
+     * survives, making an already-stale entry look "new" again.
+     *
+     * Threading `nowMs` in from the caller rather than reading the system clock here, matching the
+     * rest of this codebase's testability convention (MealHypothesis, ConfirmTrancheController,
+     * ...) — a class that reads its own wall clock cannot be driven deterministically from a test.
+     *
+     * Self-heals as a side effect: whatever this read finds too old for THIS [nowMs] is dropped
+     * from the backing store too, not just from the returned list — so staleness can never persist
+     * for longer than [RECENT_MS] regardless of whether new Android callbacks keep arriving.
+     */
+    fun recentTransitions(nowMs: Long): List<Transition> {
+        val fresh = storedTransitions.filter { nowMs - it.atMs <= RECENT_MS }
+        storedTransitions = fresh
+        return fresh
+    }
 
     private val registered = AtomicBoolean(false)
 
@@ -120,7 +150,7 @@ class GpsActivityRecognitionIngest @Inject constructor(
         val entering = transitionType == ActivityTransition.ACTIVITY_TRANSITION_ENTER
         aapsLogger.info(LTag.APS, "GpsActivityRecognitionIngest: activityType=$activityType entering=$entering at=$atMs")
         val cutoff = atMs - RECENT_MS
-        recentTransitions = recentTransitions.filter { it.atMs >= cutoff } + Transition(activityType, entering, atMs)
+        storedTransitions = storedTransitions.filter { it.atMs >= cutoff } + Transition(activityType, entering, atMs)
     }
 
     companion object {

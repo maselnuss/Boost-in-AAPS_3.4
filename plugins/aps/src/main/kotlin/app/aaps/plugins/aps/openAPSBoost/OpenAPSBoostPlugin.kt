@@ -1394,7 +1394,10 @@ open class OpenAPSBoostPlugin @Inject constructor(
         // covered live, and better, by this GPS path. See TODO.md for the full reasoning.) Appended
         // to the exerciseShadowNsNotes StringBuilder (flushed to reason/consoleError further below)
         // — detection only, no effect on TT/dosing.
-        for (transition in gpsActivityRecognitionIngest.recentTransitions) {
+        // 2026-09-05: now() is threaded in explicitly so staleness ages out on THIS cycle's clock,
+        // not only when Android happens to deliver a fresh transition — see recentTransitions()'s
+        // KDoc for the real overnight-ferry incident this fixes.
+        for (transition in gpsActivityRecognitionIngest.recentTransitions(now)) {
             if (!loggedGpsTransitionMs.add(transition.atMs)) continue   // already logged this event
             val label = when (transition.activityType) {
                 DetectedActivity.ON_BICYCLE -> "ON_BICYCLE"
