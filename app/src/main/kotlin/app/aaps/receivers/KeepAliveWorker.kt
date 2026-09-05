@@ -134,6 +134,8 @@ class KeepAliveWorker(
         dstHelperPlugin.dstCheck()
         localAlertUtils.shortenSnoozeInterval()
         localAlertUtils.checkStaleBGAlert()
+        // 2026-09-05: catches a silently dead calculation chain — see LocalAlertUtilsImpl.
+        localAlertUtils.checkStaleLoopAlert(loop.lastRun?.lastAPSRun ?: 0L, loop.runningMode.isLoopRunning())
         checkPump()
         checkAPS()
         maintenancePlugin.deleteLogs(30)

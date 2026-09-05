@@ -32,4 +32,11 @@ interface LocalAlertUtils {
      * Overview notification with sound, Therapy event
      */
     fun checkStaleBGAlert()
+
+    /**
+     * Warn when the loop has not produced a successful run for too long while it is supposed to be
+     * running (2026-09-05). [lastLoopRun] is passed in rather than read here so this class needs no
+     * dependency on Loop; 0 means "never ran in this process" and is ignored.
+     */
+    fun checkStaleLoopAlert(lastLoopRun: Long, loopShouldBeRunning: Boolean)
 }

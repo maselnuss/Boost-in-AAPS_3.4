@@ -54,6 +54,18 @@ class LocalAlertUtilsImpl @Inject constructor(
 
     private val disposable = CompositeDisposable()
 
+    /** In-memory snooze for the stale-loop alarm — see checkStaleLoopAlert. */
+    private var nextStaleLoopAlarm: Long = 0L
+
+    /** First moment this process saw the loop enabled; used while Loop.lastRun is still null. */
+    private var staleLoopReference: Long = 0L
+
+    private companion object {
+        /** Six normal cycles. Long enough that a single slow cycle never alarms. */
+        const val STALE_LOOP_THRESHOLD_MS = 30 * 60 * 1000L
+        const val STALE_LOOP_RENOTIFY_MS = 15 * 60 * 1000L
+    }
+
     private fun missedReadingsThreshold(): Long {
         return T.mins(preferences.get(IntKey.AlertsStaleDataThreshold).toLong()).msecs()
     }
@@ -124,6 +136,47 @@ class LocalAlertUtilsImpl @Inject constructor(
             if (preferences.get(LocalAlertLongKey.NextPumpDisconnectedAlarm) < earliestAlarmTime) {
                 preferences.put(LocalAlertLongKey.NextPumpDisconnectedAlarm, earliestAlarmTime)
             }
+        }
+    }
+
+    /**
+     * 2026-09-05 — added after a real incident: the calculation chain failed with
+     * "missing input data" (its payload lives in an in-memory map that is emptied on read, and the
+     * worker arrived after the next reading had already replaced its chain). WorkManager treats that
+     * as a terminal FAILURE, so there is no retry — the loop simply stopped dosing for hours and
+     * NOTHING told the user. BG readings kept arriving, so the display looked alive.
+     *
+     * Deliberately independent of the cause: it does not care WHY no run happened, only that none
+     * did. That is what makes it a safety net rather than a fix for one specific bug.
+     *
+     * [STALE_LOOP_THRESHOLD_MS] is six times the normal five-minute cycle, so ordinary hiccups
+     * (a slow cycle, a brief pump disconnect) never trigger it. The snooze is in-memory on purpose:
+     * after an app restart the user should be told again quickly if the loop is still stuck.
+     */
+    override fun checkStaleLoopAlert(lastLoopRun: Long, loopShouldBeRunning: Boolean) {
+        if (!loopShouldBeRunning) {
+            staleLoopReference = 0L
+            nextStaleLoopAlarm = 0L
+            rxBus.send(EventDismissNotification(Notification.LOOP_STALE))
+            return
+        }
+        // Loop.lastRun is in-memory and null right after an app restart. Treating that as healthy
+        // would hide exactly the case we care about (restarted, then never looped again), so fall
+        // back to the first moment we saw the loop enabled in this process.
+        if (staleLoopReference == 0L) staleLoopReference = dateUtil.now()
+        val reference = if (lastLoopRun > 0L) lastLoopRun else staleLoopReference
+        val staleFor = dateUtil.now() - reference
+        if (staleFor > STALE_LOOP_THRESHOLD_MS) {
+            if (nextStaleLoopAlarm < dateUtil.now()) {
+                nextStaleLoopAlarm = dateUtil.now() + STALE_LOOP_RENOTIFY_MS
+                aapsLogger.error(LTag.CORE, "Loop stale: no successful run for ${staleFor / 60000} minutes")
+                val n = Notification(Notification.LOOP_STALE, rh.gs(R.string.loop_stale_no_calculation, staleFor / 60000), Notification.URGENT)
+                n.soundId = R.raw.alarm
+                rxBus.send(EventNewNotification(n))
+            }
+        } else {
+            nextStaleLoopAlarm = 0L
+            rxBus.send(EventDismissNotification(Notification.LOOP_STALE))
         }
     }
 

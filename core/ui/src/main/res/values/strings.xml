@@ -39,6 +39,7 @@
     <string name="confirm">Confirm</string>
     <string name="pump">Pump</string>
     <string name="missed_bg_readings">Missed BG readings</string>
+    <string name="loop_stale_no_calculation">Loop has not run for %1$d minutes! No insulin is being calculated or delivered. Check the app and restart it if necessary.</string>
     <string name="treatments_iob_label_string">IOB:</string>
     <string name="mute5min">Mute for 5 minutes</string>
     <string name="mute">Mute</string>

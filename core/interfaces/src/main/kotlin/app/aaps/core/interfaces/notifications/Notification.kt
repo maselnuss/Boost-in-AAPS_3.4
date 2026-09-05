@@ -145,6 +145,14 @@ open class Notification {
         const val EQUIL_ALARM = 93
         const val EQUIL_ALARM_INSULIN = 94
 
+        /**
+         * 2026-09-05: no successful loop run for a long time although the loop is supposed to be
+         * running. Added after a real incident where the calculation chain failed silently
+         * ("missing input data") and dosing stopped for HOURS with nothing telling the user —
+         * the failure is a terminal WorkManager result, so there is no retry and no other signal.
+         */
+        const val LOOP_STALE = 95
+
         const val USER_MESSAGE = 1000
 
         // Konzept 7 (2026-08-26) — Boost V6 periodic auto-config review. Own ID (not USER_MESSAGE)
