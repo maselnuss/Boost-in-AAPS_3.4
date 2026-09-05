@@ -330,10 +330,19 @@ open class OpenAPSBoostV5Plugin @Inject constructor(
     // Tranche-threshold shadow (2026-09-03). Own window, deliberately NOT reusing the review
     // cadence: this is a rolling estimate that wants as many episodes as it can get, not a
     // user-facing interruption. 28 days matches the redrive lookback (same "14 days is
-    // noise-dominated" reasoning), 6h recompute is far more often than the answer can move but
-    // keeps it fresh after a build without waiting a day.
+    // noise-dominated" reasoning).
     private val TRANCHE_SHADOW_LOOKBACK_MS = 28L * 24 * 60 * 60 * 1000
-    private val TRANCHE_SHADOW_INTERVAL_MS = 6L * 60 * 60 * 1000
+
+    // 2026-09-05: interval was 6 h ("far more often than the answer can move, but keeps it fresh
+    // after a build"). Measured against the real database, getApsResults() over the 28-day window
+    // materialises ~10 400 rows whose `reason` strings alone are ~11 MB — by a wide margin the
+    // largest single allocation Boost makes, and 68 % of each string is diagnostic tags. Four runs
+    // a day bought nothing: by the shadow's own reasoning the derived threshold moves on the scale
+    // of days, so it produced the same answer four times over. Once a day keeps the full 28-day
+    // statistical power and every bit of information at a quarter of the allocation spikes.
+    // NOT a fix for the 05.09. outage (that was the quadratic Wear loop) — this is hygiene, so that
+    // the next slowdown has more headroom to eat into before anything breaks.
+    private val TRANCHE_SHADOW_INTERVAL_MS = 24L * 60 * 60 * 1000
     /** Consecutive CONFIRMED cycles closer than this belong to the same meal, not a new episode. */
     private val EPISODE_GAP_MS = 15L * 60 * 1000
     /** Outcome window after a confirm — same 3h as confirmed_cap_shadow's bg_outcome_180min. */
