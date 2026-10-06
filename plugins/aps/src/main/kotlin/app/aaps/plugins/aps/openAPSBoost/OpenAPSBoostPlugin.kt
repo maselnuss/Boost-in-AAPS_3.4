@@ -1527,19 +1527,14 @@ open class OpenAPSBoostPlugin @Inject constructor(
             val nowDayType = MealTimeLearner.dayTypeOf(now, offsetMs)
             val learnedHit = MealTimeLearner.preMealWindow(mealTimeHistoryCached, nowMin, offsetMs, leadMaxMin, nowDayType)
 
-            // Manual MEAL tap: recorded into the history unconditionally (it is training data,
-            // independent of whether exercise suppresses the target below). Dedup against the
-            // persisted history itself so it stays restart-safe, and ignore a tap within
-            // MIN_TAP_GAP_MIN of an existing event (accidental double-tap).
+            // Manual MEAL tap: training data, recorded independent of whether exercise suppresses the
+            // target below. MealTimeLearner.record merges it with a V5 commit of the same meal (the
+            // earliest wins), and the stored-event guard keeps this restart-safe.
             val lastMealTapMs = preferences.get(LongNonKey.ApsBoostLastMealTapMs)
             if (lastMealTapMs > 0 && lastMealTapMs !in mealTimeHistoryCached.events) {
-                val tooSoonAfterRecordedEvent = mealTimeHistoryCached.events.any {
-                    kotlin.math.abs(it - lastMealTapMs) < MealTimeLearner.MIN_TAP_GAP_MIN * 60_000L
-                }
-                if (tooSoonAfterRecordedEvent) {
-                    aapsLogger.debug(LTag.APS, "V6 meal-time learner: ignored tap @ ${dateUtil.dateAndTimeString(lastMealTapMs)} — within ${MealTimeLearner.MIN_TAP_GAP_MIN}min of a recorded event")
-                } else {
-                    mealTimeHistoryCached = MealTimeLearner.record(mealTimeHistoryCached, lastMealTapMs)
+                val updated = MealTimeLearner.record(mealTimeHistoryCached, lastMealTapMs)
+                if (updated.events != mealTimeHistoryCached.events) {
+                    mealTimeHistoryCached = updated
                     preferences.put(StringKey.ApsBoostMealTimeHistory, mealTimeHistoryCached.serialize())
                     aapsLogger.debug(LTag.APS, "V6 meal-time learner: recorded MANUAL tap @ ${dateUtil.dateAndTimeString(lastMealTapMs)} (${mealTimeHistoryCached.events.size} events)")
                 }
@@ -2064,9 +2059,12 @@ open class OpenAPSBoostPlugin @Inject constructor(
             // V6 meal-time learner: record a FRESH CONFIRMED commit (the event V5 treats as a meal)
             // so the pre-meal window learns this user's habitual meal times. Persist only on change.
             if (v5decision != null && v5decision.mealSessionStarted) {
-                mealTimeHistoryCached = MealTimeLearner.record(mealTimeHistoryCached, now)
-                preferences.put(StringKey.ApsBoostMealTimeHistory, mealTimeHistoryCached.serialize())
-                aapsLogger.debug(LTag.APS, "V6 meal-time learner: recorded meal commit @ ${dateUtil.dateAndTimeString(now)} (${mealTimeHistoryCached.events.size} events)")
+                val updated = MealTimeLearner.record(mealTimeHistoryCached, now)
+                if (updated.events != mealTimeHistoryCached.events) {
+                    mealTimeHistoryCached = updated
+                    preferences.put(StringKey.ApsBoostMealTimeHistory, mealTimeHistoryCached.serialize())
+                    aapsLogger.debug(LTag.APS, "V6 meal-time learner: recorded meal commit @ ${dateUtil.dateAndTimeString(now)} (${mealTimeHistoryCached.events.size} events)")
+                }
             }
 
             // Step-feed availability telemetry (F1, 2026-07-07) — written EVERY cycle so a dark

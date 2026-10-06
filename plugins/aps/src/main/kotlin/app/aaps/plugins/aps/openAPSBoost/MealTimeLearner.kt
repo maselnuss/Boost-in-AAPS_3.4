@@ -58,9 +58,9 @@ object MealTimeLearner {
     /** Guaranteed minimum window span (min), so a low leadMax setting can't yield a zero-width window. */
     const val PRE_MEAL_MIN_SPAN_MIN = 10
 
-    /** A manual MEAL tap within this many minutes of an already-recorded event is treated as an
-     *  accidental repeat (double-tap), not a second real meal — see caller in OpenAPSBoostPlugin. */
-    const val MIN_TAP_GAP_MIN = 15
+    /** Two events closer than this are one meal (a MEAL tap at the start, the V5 commit 20-60 min
+     *  later, a double-tap): [record] keeps only the earliest, so the learner counts a meal once. */
+    const val SAME_MEAL_GAP_MIN = 90
 
     private const val MINUTES_PER_DAY = 1440
 
@@ -123,11 +123,17 @@ object MealTimeLearner {
     }
 
     /**
-     * Record a fresh meal-commit at [tsMs]. Appends and trims to the rolling window.
-     * Returns the updated history (caller persists).
+     * Record a fresh meal-commit at [tsMs]. Appends and trims to the rolling window. An event within
+     * [SAME_MEAL_GAP_MIN] of an existing one is the same meal: an earlier existing event wins (the
+     * new one is dropped), a later existing event is replaced by the earlier [tsMs]. Returns the
+     * updated history (caller persists); an unchanged `events` list means nothing was recorded.
      */
     fun record(h: History, tsMs: Long): History {
         val newEvents = h.events.toMutableList()
+        val gapMs = SAME_MEAL_GAP_MIN * 60_000L
+        val sameMeal = newEvents.filter { abs(it - tsMs) < gapMs }
+        if (sameMeal.any { it <= tsMs }) return History(newEvents)
+        newEvents.removeAll(sameMeal)
         newEvents.add(tsMs)
         val cutoff = tsMs - WINDOW_MS
         newEvents.removeAll { it < cutoff }

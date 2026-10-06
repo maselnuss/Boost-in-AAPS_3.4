@@ -131,6 +131,39 @@ class MealTimeLearnerTest {
         assertThat(h.events).containsExactly(recent, now).inOrder()   // old pruned, new kept
     }
 
+    @Test fun `a later event of the same meal is dropped, the earliest stays`() {
+        val tap = ev(10, 720)                       // MEAL tap at 12:00
+        var h = MealTimeLearner.record(historyOf(), tap)
+        h = MealTimeLearner.record(h, tap + 40 * 60_000L)   // V5 commit 40 min later
+        assertThat(h.events).containsExactly(tap)
+    }
+
+    @Test fun `an earlier event replaces a later one of the same meal`() {
+        val commit = ev(10, 740)                    // V5 commit at 12:20 recorded first
+        val tap = ev(10, 725)                       // tap at 12:05 arrives afterwards
+        val h = MealTimeLearner.record(historyOf(commit), tap)
+        assertThat(h.events).containsExactly(tap)
+    }
+
+    @Test fun `events further apart than the same-meal gap are separate meals`() {
+        val lunch = ev(10, 720)
+        val snack = lunch + (MealTimeLearner.SAME_MEAL_GAP_MIN + 1) * 60_000L
+        val h = MealTimeLearner.record(historyOf(lunch), snack)
+        assertThat(h.events).containsExactly(lunch, snack).inOrder()
+    }
+
+    @Test fun `tap plus commit per meal needs the full six days to become a mode`() {
+        // 4 days, each with a tap (12:00) and a V5 commit 40 min later: without merging this was 8 events
+        // over 4 days = a trusted mode after 4 days, centred ~12:20.
+        var h = historyOf()
+        for (day in 1L..4L) {
+            h = MealTimeLearner.record(h, ev(day, 720))
+            h = MealTimeLearner.record(h, ev(day, 760))
+        }
+        assertThat(h.events).hasSize(4)
+        assertThat(MealTimeLearner.modes(h, offset)).isEmpty()
+    }
+
     // ─── day-type split ──────────────────────────────────────────────
     // Epoch day 0 = 1970-01-01 = Thursday, so with offset 0 the `ev(day, ...)` helper's `day` is
     // also the real weekday: day % 7 == 3 → Sunday, day % 7 == 2 → Saturday (verified against
