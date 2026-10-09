@@ -33,5 +33,18 @@ enum class LongNonKey(
     // Timestamp of the last manual MEAL button tap (epoch ms). Written by BoostOverviewV2Fragment on
     // tap, read by OpenAPSBoostPlugin's next cycle. Internal UI→loop bridge, not a Settings toggle.
     ApsBoostLastMealTapMs("boost_last_meal_tap_ms", 0L),
+
+    // Tap timestamp the user cancelled via the MEAL button's CANCEL state (0 = none pending). Written
+    // by BoostOverviewV2Fragment together with ApsBoostLastMealTapMs=0; OpenAPSBoostPlugin's next cycle
+    // removes that event from the meal-time history and clears this key.
+    ApsBoostMealTapCancelMs("boost_meal_tap_cancel_ms", 0L),
+
+    // CANCEL of the AUTO/learned pre-meal: time of the cancel tap. The plugin suppresses only the learned
+    // trigger (never a manual tap) for the configured pre-meal lead time after it. Written by
+    // BoostOverviewV2Fragment, read by OpenAPSBoostPlugin.
+    ApsBoostPreMealCancelledAtMs("boost_premeal_cancelled_at_ms", 0L),
+    // Written by OpenAPSBoostPlugin every cycle the learned trigger lowers the target (now + 10 min);
+    // the Fragment only reads it to show the MEAL button as CANCEL. Self-expiring.
+    ApsBoostPreMealWindowActiveUntilMs("boost_premeal_window_active_until_ms", 0L),
 }
 

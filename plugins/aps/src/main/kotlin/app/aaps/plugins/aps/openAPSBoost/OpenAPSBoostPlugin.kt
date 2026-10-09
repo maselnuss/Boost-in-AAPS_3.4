@@ -1525,25 +1525,65 @@ open class OpenAPSBoostPlugin @Inject constructor(
             // SUNDAY, so a Sunday-only ~13:00 pattern isn't diluted by unrelated weekday events. Same
             // (now, offsetMs) arithmetic MealTimeLearner uses internally for historical events.
             val nowDayType = MealTimeLearner.dayTypeOf(now, offsetMs)
-            val learnedHit = MealTimeLearner.preMealWindow(mealTimeHistoryCached, nowMin, offsetMs, leadMaxMin, nowDayType)
+            val learnedHit = MealTimeLearner.preMealWindow(
+                mealTimeHistoryCached, nowMin, offsetMs, leadMaxMin, nowDayType,
+                graduationState = mealTimeGraduationCached, nowMs = now,
+            )
+
+            // Cancelled MEAL tap (button in CANCEL state): the UI already zeroed ApsBoostLastMealTapMs, so the
+            // pre-meal window is gone; here the tap's learner event is removed so it can't skew the modes.
+            val cancelledTapMs = preferences.get(LongNonKey.ApsBoostMealTapCancelMs)
+            if (cancelledTapMs > 0) {
+                // The tap's day must also leave the Stage 2 graduation tally (derived from the modes as
+                // they stood while the tap still counted). A graduation already granted stays.
+                mealTimeModeKeyForTap(cancelledTapMs, offsetMs)?.let { (key, dayIndex) ->
+                    mealTimeGraduationCached = MealTimeLearner.revokeGraduationDay(mealTimeGraduationCached, key, dayIndex)
+                    preferences.put(StringKey.ApsBoostMealTimeGraduation, mealTimeGraduationCached.serialize())
+                }
+                val gapMs = MealTimeLearner.SAME_MEAL_GAP_MIN * 60_000L
+                val cancelledEvents = mealTimeHistoryCached.events.mapNotNull { e ->
+                    when {
+                        e.tsMs == cancelledTapMs -> null                                              // the tap's own event
+                        e.manual && kotlin.math.abs(e.tsMs - cancelledTapMs) < gapMs -> e.copy(manual = false) // tap merged into an earlier V5 commit
+                        else -> e
+                    }
+                }
+                if (cancelledEvents != mealTimeHistoryCached.events) {
+                    mealTimeHistoryCached = MealTimeLearner.History(cancelledEvents.toMutableList())
+                    preferences.put(StringKey.ApsBoostMealTimeHistory, mealTimeHistoryCached.serialize())
+                    aapsLogger.debug(LTag.APS, "V6 meal-time learner: removed CANCELLED manual tap @ ${dateUtil.dateAndTimeString(cancelledTapMs)} (${mealTimeHistoryCached.events.size} events)")
+                }
+                preferences.put(LongNonKey.ApsBoostMealTapCancelMs, 0L)
+            }
 
             // Manual MEAL tap: training data, recorded independent of whether exercise suppresses the
             // target below. MealTimeLearner.record merges it with a V5 commit of the same meal (the
-            // earliest wins), and the stored-event guard keeps this restart-safe.
+            // earliest wins, the manual flag survives), and "history unchanged" keeps this restart-safe.
             val lastMealTapMs = preferences.get(LongNonKey.ApsBoostLastMealTapMs)
-            if (lastMealTapMs > 0 && lastMealTapMs !in mealTimeHistoryCached.events) {
-                val updated = MealTimeLearner.record(mealTimeHistoryCached, lastMealTapMs)
+            if (lastMealTapMs > 0 && mealTimeHistoryCached.events.none { it.tsMs == lastMealTapMs && it.manual }) {
+                val updated = MealTimeLearner.record(mealTimeHistoryCached, lastMealTapMs, manual = true)
                 if (updated.events != mealTimeHistoryCached.events) {
                     mealTimeHistoryCached = updated
                     preferences.put(StringKey.ApsBoostMealTimeHistory, mealTimeHistoryCached.serialize())
                     aapsLogger.debug(LTag.APS, "V6 meal-time learner: recorded MANUAL tap @ ${dateUtil.dateAndTimeString(lastMealTapMs)} (${mealTimeHistoryCached.events.size} events)")
+                    // Stage 2 graduation progress: credit this day to the mode the tap clustered into (if any yet).
+                    mealTimeModeKeyForTap(lastMealTapMs, offsetMs)?.let { (key, dayIndex) ->
+                        mealTimeGraduationCached = MealTimeLearner.recordGraduationProgress(mealTimeGraduationCached, key, dayIndex, now)
+                        preferences.put(StringKey.ApsBoostMealTimeGraduation, mealTimeGraduationCached.serialize())
+                    }
                 }
             }
             val tapAgeMin = manualTapAgeMin(now, lastMealTapMs)
             val isManualTapActive = manualTapActive(now, lastMealTapMs)
 
+            // CANCEL on the MEAL button also suppresses the AUTO/learned trigger (never a manual tap: a tap
+            // right after cancelling is an explicit "I am eating" and must still work).
+            // Suppressed for the configured lead time: a learned window is never longer than that, so the
+            // cancelled occurrence stays off until it closes, and a later meal is not blocked.
+            val isPreMealCancelled = now < preferences.get(LongNonKey.ApsBoostPreMealCancelledAtMs) + leadMaxMin * 60_000L
+            val firedViaLearnedHit = learnedHit != null && !isPreMealCancelled
             val triggerDesc = when {
-                learnedHit != null -> "learned ~${formatClockMin(learnedHit.mode.centreMin)}, ${learnedHit.minutesBeforeMeal}min before, ${learnedHit.mode.distinctDays}d"
+                firedViaLearnedHit -> "learned ~${formatClockMin(learnedHit!!.mode.centreMin)}, ${learnedHit.minutesBeforeMeal}min before, ${learnedHit.mode.distinctDays}d"
                 isManualTapActive  -> "manual tap ${tapAgeMin}min ago"
                 else               -> return@run
             }
@@ -1559,6 +1599,11 @@ open class OpenAPSBoostPlugin @Inject constructor(
                     v6MinBg = minOf(v6MinBg, preMealTarget)
                     v6MaxBg = minOf(v6MaxBg, preMealTarget)
                     v6TargetBg = preMealTarget
+                    // Re-asserted every cycle while the AUTO trigger is what lowers the target; the UI turns the
+                    // MEAL button into CANCEL while this is fresh (goes stale by itself once the window closes).
+                    if (firedViaLearnedHit) {
+                        preferences.put(LongNonKey.ApsBoostPreMealWindowActiveUntilMs, now + 10 * 60_000L)
+                    }
                     "V6 pre-meal ACTIVE target=${preMealTarget.toInt()} ($triggerDesc); "
                 } else {
                     "V6 pre-meal skipped (target ${preMealTarget.toInt()} ≥ current ${v6TargetBg.toInt()}); "
@@ -2059,7 +2104,7 @@ open class OpenAPSBoostPlugin @Inject constructor(
             // V6 meal-time learner: record a FRESH CONFIRMED commit (the event V5 treats as a meal)
             // so the pre-meal window learns this user's habitual meal times. Persist only on change.
             if (v5decision != null && v5decision.mealSessionStarted) {
-                val updated = MealTimeLearner.record(mealTimeHistoryCached, now)
+                val updated = MealTimeLearner.record(mealTimeHistoryCached, now, manual = false)
                 if (updated.events != mealTimeHistoryCached.events) {
                     mealTimeHistoryCached = updated
                     preferences.put(StringKey.ApsBoostMealTimeHistory, mealTimeHistoryCached.serialize())
@@ -2511,6 +2556,19 @@ open class OpenAPSBoostPlugin @Inject constructor(
     // construction; updated at end of invoke() when a fresh CONFIRMED fires, persisted on change.
     @Volatile private var mealTimeHistoryCached: MealTimeLearner.History =
         MealTimeLearner.History.deserialize(preferences.getBoostDosing(StringKey.ApsBoostMealTimeHistory))
+    // Stage 2 trust-gate graduation state (kept apart from the 60-day history: it must outlive its prune).
+    @Volatile private var mealTimeGraduationCached: MealTimeLearner.GraduationState =
+        MealTimeLearner.GraduationState.deserialize(preferences.getBoostDosing(StringKey.ApsBoostMealTimeGraduation))
+
+    /** [ModeKey] + local day index a tap at [tapMs] belongs to, or null when no mode covers that time yet. */
+    private fun mealTimeModeKeyForTap(tapMs: Long, offsetMs: Long): Pair<MealTimeLearner.ModeKey, Long>? {
+        val dayType = MealTimeLearner.dayTypeOf(tapMs, offsetMs)
+        val minOfDay = SleepHistoryTracker.msToMinOfDay(tapMs, offsetMs)
+        val mode = MealTimeLearner.modeNear(MealTimeLearner.modesByDayType(mealTimeHistoryCached, offsetMs)[dayType].orEmpty(), minOfDay)
+            ?: return null
+        return MealTimeLearner.modeKeyOf(dayType, mode.centreMin) to (tapMs + offsetMs) / (24L * 60L * 60L * 1000L)
+    }
+
     // Activity-load SHADOW — rolling 28-day PER-SOURCE daily-step history (multi-source abstraction
     // 2026-06-28; deserialize auto-migrates the old single-source blob). Persisted under the same key.
     @Volatile private var multiStepHistoryCached: DailyStepHistoryTracker.MultiSourceHistory =

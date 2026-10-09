@@ -109,6 +109,11 @@ enum class StringKey(
     // meals → feature never fires (safe default).
     ApsBoostMealTimeHistory("boost_meal_time_history", "", defaultedBySM = true),
 
+    // Trust-gate Stage 2 graduation state (Konzept 6.2) — JSON {modeKey: {days:[dayIdx], graduatedAt}}.
+    // Separate from the history above because it must outlive that history's 60-day prune (a
+    // graduation is valid 180 days). Empty/corrupt → nothing graduated → Stage 1 applies (safe default).
+    ApsBoostMealTimeGraduation("boost_meal_time_graduation", "", defaultedBySM = true),
+
     // Activity-load SHADOW (2026-06-16) — JSON of single-source per-day step totals (rolling 28d).
     // Drives the personal step baseline; the activity/inactivity ISF factors are LOGGED ONLY (shadow).
     ApsBoostDailyStepHistory("boost_daily_step_history", "", defaultedBySM = true),

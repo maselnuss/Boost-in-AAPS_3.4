@@ -503,12 +503,38 @@ class BoostOverviewV2Fragment : DaggerFragment(), View.OnClickListener {
         runOnUiThread {
             _binding ?: return@runOnUiThread
             processButtonsVisibility()
+            updateMealButton()
             updateGraph()
             updateNotification()
             updateRangeButtons()
             updateAidStatus()
         }
     }
+
+    /** MEAL button: cyan "MEAL" normally, amber "CANCEL" while the last tap's pre-meal window is open. */
+    @SuppressLint("SetTextI18n")
+    private fun updateMealButton() {
+        val b = _binding ?: return
+        val active = isMealCancelable()
+        val hex = if (active) "ffb300" else "00d4ff"
+        val tint = Color.parseColor("#$hex")
+        b.v2BtnMealLabel.text = if (active) "CANCEL" else "MEAL"
+        b.v2BtnMeal.setCardBackgroundColor(Color.parseColor((if (active) "#33" else "#1a") + hex))
+        b.v2BtnMeal.strokeColor = Color.parseColor((if (active) "#4d" else "#26") + hex)
+        b.v2BtnMealIcon.setColorFilter(tint)
+        b.v2BtnMealLabel.setTextColor(tint)
+    }
+
+    /** CANCEL state: a manual tap's window is open OR the plugin's AUTO/learned pre-meal is currently lowering the target. */
+    private fun isMealCancelable(): Boolean {
+        val nowMs = dateUtil.now()
+        return isMealTapActive(nowMs, preferences.get(LongNonKey.ApsBoostLastMealTapMs)) ||
+            preferences.get(LongNonKey.ApsBoostPreMealWindowActiveUntilMs) > nowMs
+    }
+
+    // Must match OpenAPSBoostPlugin.MANUAL_MEAL_WINDOW_MIN (plugins:aps is not a dependency of plugins:main).
+    private fun isMealTapActive(nowMs: Long, lastTapMs: Long): Boolean =
+        lastTapMs > 0 && (nowMs - lastTapMs) / 60_000L in 0..45
 
     // --- BG Bobble ---
 
@@ -1217,30 +1243,32 @@ class BoostOverviewV2Fragment : DaggerFragment(), View.OnClickListener {
                 }
 
                 R.id.v2_btn_meal -> {
-                    // Only persist the tap timestamp: OpenAPSBoostPlugin is the single writer of the
-                    // meal-time history and picks the tap up in the next cycle.
-                    val tapNow = dateUtil.now()
-                    preferences.put(LongNonKey.ApsBoostLastMealTapMs, tapNow)
-                    aapsLogger.debug(LTag.APS, "Boost MEAL button tapped at ${dateUtil.dateAndTimeString(tapNow)}")
-                    // Force a cycle now instead of waiting for the next scheduled one, so the tap
-                    // takes effect immediately and the UI can confirm it.
-                    handler.post { loop.invoke("BoostMealTap", allowNotification = false) }
+                    // The tap timestamp is the only state written here: OpenAPSBoostPlugin is the single
+                    // writer of the meal-time history and picks tap/cancel up in the next cycle. While a
+                    // tap is still inside its pre-meal window the button is a CANCEL button.
+                    val nowMs = dateUtil.now()
+                    val lastTapMs = preferences.get(LongNonKey.ApsBoostLastMealTapMs)
+                    val tapActive = isMealTapActive(nowMs, lastTapMs)
+                    val autoActive = preferences.get(LongNonKey.ApsBoostPreMealWindowActiveUntilMs) > nowMs
+                    val cancelling = tapActive || autoActive
+                    if (tapActive) {
+                        preferences.put(LongNonKey.ApsBoostMealTapCancelMs, lastTapMs)
+                        preferences.put(LongNonKey.ApsBoostLastMealTapMs, 0L)
+                        aapsLogger.debug(LTag.APS, "Boost MEAL tap CANCELLED (tap was ${dateUtil.dateAndTimeString(lastTapMs)})")
+                    } else if (autoActive) {
+                        // Only the AUTO/learned trigger is suppressed (for the pre-meal lead time, see plugin); the next tap is a normal manual tap again.
+                        preferences.put(LongNonKey.ApsBoostPreMealCancelledAtMs, nowMs)
+                        preferences.put(LongNonKey.ApsBoostPreMealWindowActiveUntilMs, 0L)
+                        aapsLogger.debug(LTag.APS, "Boost AUTO pre-meal CANCELLED at ${dateUtil.dateAndTimeString(nowMs)} (learned trigger suppressed for the lead time)")
+                    } else {
+                        preferences.put(LongNonKey.ApsBoostLastMealTapMs, nowMs)
+                        aapsLogger.debug(LTag.APS, "Boost MEAL button tapped at ${dateUtil.dateAndTimeString(nowMs)}")
+                    }
+                    // Force a cycle now so the tap/cancel takes effect immediately instead of waiting
+                    // for the next scheduled one.
+                    handler.post { loop.invoke(if (cancelling) "BoostMealCancel" else "BoostMealTap", allowNotification = false) }
                     handler.postDelayed({ refreshAll() }, 1500L)
-                    // Instant local confirmation: briefly recolor the button amber and show LOGGED.
-                    val flashColor = Color.parseColor("#ffb300")
-                    binding.v2BtnMealLabel.text = "LOGGED"
-                    binding.v2BtnMeal.setCardBackgroundColor(Color.parseColor("#33ffb300"))
-                    binding.v2BtnMeal.strokeColor = Color.parseColor("#4dffb300")
-                    binding.v2BtnMealIcon.setColorFilter(flashColor)
-                    binding.v2BtnMealLabel.setTextColor(flashColor)
-                    binding.v2BtnMealLabel.postDelayed({
-                        val normalColor = Color.parseColor("#00d4ff")
-                        binding.v2BtnMealLabel.text = "MEAL"
-                        binding.v2BtnMeal.setCardBackgroundColor(Color.parseColor("#1a00d4ff"))
-                        binding.v2BtnMeal.strokeColor = Color.parseColor("#2600d4ff")
-                        binding.v2BtnMealIcon.setColorFilter(normalColor)
-                        binding.v2BtnMealLabel.setTextColor(normalColor)
-                    }, 2000L)
+                    updateMealButton()
                 }
 
                 // AID status tap -> loop dialog

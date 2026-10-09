@@ -49,6 +49,7 @@ class CalibrationBlockTest : TestBaseWithProfile() {
         whenever(preferences.get(StringKey.ApsBoostSleepState)).thenReturn("")
         whenever(preferences.get(StringKey.ApsBoostSleepHistory)).thenReturn("")
         whenever(preferences.get(StringKey.ApsBoostMealTimeHistory)).thenReturn("")
+        whenever(preferences.get(StringKey.ApsBoostMealTimeGraduation)).thenReturn("")
         whenever(preferences.get(StringKey.ApsBoostDailyStepHistory)).thenReturn("")
         whenever(preferences.get(StringKey.ApsBoostIntradayStepBank)).thenReturn("")
         plugin = OpenAPSBoostPlugin(
