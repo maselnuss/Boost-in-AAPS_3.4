@@ -27,6 +27,7 @@ import app.aaps.core.interfaces.configuration.Config
 import app.aaps.core.interfaces.constraints.ConstraintsChecker
 import app.aaps.core.interfaces.db.PersistenceLayer
 import app.aaps.core.interfaces.db.ProcessedTbrEbData
+import app.aaps.core.interfaces.aps.GlucoseStatus
 import app.aaps.core.interfaces.iob.GlucoseStatusProvider
 import app.aaps.core.interfaces.iob.IobCobCalculator
 import app.aaps.core.interfaces.logging.AAPSLogger
@@ -1279,7 +1280,21 @@ class DataHandlerMobile @Inject constructor(
         sendUserActions()
         // GraphData
         iobCobCalculator.ads.getBucketedDataTableCopy()?.let { bucketedData ->
-            rxBus.send(EventMobileToWear(EventData.GraphData(ArrayList(bucketedData.map { getSingleBG(it) }))))
+            // 2026-09-05: hoisted out of the map — these are identical for every element and one of
+            // them copies the entire glucose table per call. See getSingleBG's KDoc for the incident
+            // this caused (410 table copies per second, OOM, loop stopped dosing).
+            val glucoseStatus = glucoseStatusProvider.getGlucoseStatusData(true)
+            val units = profileFunction.getUnits()
+            val lowLine = profileUtil.convertToMgdl(preferences.get(UnitDoubleKey.OverviewLowMark), units)
+            val highLine = profileUtil.convertToMgdl(preferences.get(UnitDoubleKey.OverviewHighMark), units)
+            val slopeArrow = (trendCalculator.getTrendArrow(iobCobCalculator.ads) ?: TrendArrow.NONE).symbol
+            rxBus.send(
+                EventMobileToWear(
+                    EventData.GraphData(
+                        ArrayList(bucketedData.map { getSingleBG(it, glucoseStatus, units, lowLine, highLine, slopeArrow) })
+                    )
+                )
+            )
         }
         // Treatments
         sendTreatments()
@@ -1601,18 +1616,46 @@ class DataHandlerMobile @Inject constructor(
         return deltaStringDetailed
     }
 
-    private fun getSingleBG(glucoseValue: InMemoryGlucoseValue): EventData.SingleBg {
-        val glucoseStatus = glucoseStatusProvider.getGlucoseStatusData(true)
-        val units = profileFunction.getUnits()
-        val lowLine = profileUtil.convertToMgdl(preferences.get(UnitDoubleKey.OverviewLowMark), units)
-        val highLine = profileUtil.convertToMgdl(preferences.get(UnitDoubleKey.OverviewHighMark), units)
-
+    /**
+     * 2026-09-05 PERFORMANCE FIX — real incident, loop dead for hours.
+     *
+     * Every value below is INDEPENDENT of [glucoseValue]: glucose status, units, both threshold
+     * lines and the trend arrow are identical for every element of a graph batch. They were
+     * nevertheless recomputed per element, and `getGlucoseStatusData` copies the whole bucketed
+     * glucose table on each call — so building the watch graph was quadratic: n elements x an
+     * n-element table copy, plus n trend-arrow computations and 3n preference reads.
+     *
+     * Measured on the user's device: 410 calls to getGlucoseStatusData in ONE second, 820 in two,
+     * on every watch-graph send. That allocation churn kept the collector from keeping up, the heap
+     * reached the 512 MB largeHeap ceiling and the app died with OutOfMemoryError twice. Under that
+     * pressure the calculation chain slowed until InvokeLoopWorker arrived after the next reading
+     * had already replaced its chain — and since its payload lives in an in-memory map that is
+     * emptied on read, it then failed with "missing input data" and the loop silently stopped
+     * dosing. Android additionally throttled the app after 12 job timeouts (limit 3).
+     *
+     * Amplified by the upstream native-cadence change merged 2026-09-03: the bucketed series is now
+     * per-minute instead of per-5-minutes, so element count and copied table each grew roughly
+     * fivefold — which is why a long-standing inefficiency only became fatal now.
+     *
+     * The defaults keep the single-value call site (`lastBg`) behaving exactly as before; only the
+     * batch call site hoists them out of the loop. Hoisting is not just faster but more correct:
+     * one batch now shares one consistent snapshot instead of re-reading live data 410 times while
+     * it may change underneath.
+     */
+    private fun getSingleBG(
+        glucoseValue: InMemoryGlucoseValue,
+        glucoseStatus: GlucoseStatus? = glucoseStatusProvider.getGlucoseStatusData(true),
+        units: GlucoseUnit = profileFunction.getUnits(),
+        lowLine: Double = profileUtil.convertToMgdl(preferences.get(UnitDoubleKey.OverviewLowMark), units),
+        highLine: Double = profileUtil.convertToMgdl(preferences.get(UnitDoubleKey.OverviewHighMark), units),
+        slopeArrow: String = (trendCalculator.getTrendArrow(iobCobCalculator.ads) ?: TrendArrow.NONE).symbol,
+    ): EventData.SingleBg {
         return EventData.SingleBg(
             dataset = 0,
             timeStamp = glucoseValue.timestamp,
             sgvString = profileUtil.stringInCurrentUnitsDetect(glucoseValue.recalculated),
             glucoseUnits = units.asText,
-            slopeArrow = (trendCalculator.getTrendArrow(iobCobCalculator.ads) ?: TrendArrow.NONE).symbol,
+            slopeArrow = slopeArrow,
             delta = glucoseStatus?.let { deltaString(it.delta, it.delta * Constants.MGDL_TO_MMOLL, units) } ?: "--",
             deltaDetailed = glucoseStatus?.let { deltaStringDetailed(it.delta, it.delta * Constants.MGDL_TO_MMOLL, units) } ?: "--",
             avgDelta = glucoseStatus?.let { deltaString(it.shortAvgDelta, it.shortAvgDelta * Constants.MGDL_TO_MMOLL, units) } ?: "--",
