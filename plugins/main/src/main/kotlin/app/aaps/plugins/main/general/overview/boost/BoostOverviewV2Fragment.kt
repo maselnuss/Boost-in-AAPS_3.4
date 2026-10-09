@@ -887,12 +887,10 @@ class BoostOverviewV2Fragment : DaggerFragment(), View.OnClickListener {
             if (plotHr || plotSteps) {
                 binding.v2SensitivityGraphContainer.visibility = View.VISIBLE
                 val actGraphData = graphDataProvider.get().with(binding.v2SensitivityGraph, overviewData)
-                val useHrForScale = plotHr && !plotSteps
-                val useStepsForScale = plotSteps
-                // Add the scale-OWNING series first so the other's multiplier is computed against the
-                // established maxY (else HR added first vs an uninitialized maxY -> flat-line trace).
-                if (plotSteps) actGraphData.addSteps(useStepsForScale, if (useStepsForScale) 1.0 else 0.8)
-                if (plotHr) actGraphData.addHeartRate(useHrForScale, if (useHrForScale) 1.0 else 0.8)
+                // HR owns the left axis whenever it is plotted; steps then get their own right axis in real
+                // units (a steps-only graph keeps the left axis).
+                if (plotSteps) actGraphData.addSteps(useForScale = !plotHr)
+                if (plotHr) actGraphData.addHeartRate(true, 1.0)
                 actGraphData.addNowLine(dateUtil.now())
                 actGraphData.formatAxis(overviewData.fromTime, overviewData.endTime)
                 actGraphData.performUpdate()

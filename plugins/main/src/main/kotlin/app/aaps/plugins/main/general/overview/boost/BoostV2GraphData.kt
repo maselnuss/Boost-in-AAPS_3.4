@@ -29,6 +29,7 @@ import com.jjoe64.graphview.DefaultLabelFormatter
 import com.jjoe64.graphview.GraphView
 import com.jjoe64.graphview.series.DataPoint
 import com.jjoe64.graphview.series.Series
+import java.text.NumberFormat
 import java.util.Locale
 import javax.inject.Inject
 import kotlin.math.abs
@@ -121,6 +122,11 @@ class BoostV2GraphData @Inject constructor(
     private var minY = Double.MAX_VALUE
     private val units: GlucoseUnit get() = profileFunction.getUnits()
     private val series: MutableList<Series<*>> = ArrayList()
+
+    // GraphView.removeAllSeries() does not clear secondScale's series, so performUpdate() manages them.
+    private val secondScaleSeries: MutableList<Series<*>> = ArrayList()
+    private var secondScaleMaxY = 1.0
+    private var secondScaleRequested = false
 
     private lateinit var graph: GraphView
     private lateinit var overviewData: OverviewData
@@ -293,14 +299,23 @@ class BoostV2GraphData @Inject constructor(
         overviewData.heartRateScale.multiplier = maxY * scale / maxHR
     }
 
-    fun addSteps(useForScale: Boolean, scale: Double) {
-        val maxSteps = (overviewData.stepsCountGraphSeries as PointsWithLabelGraphSeries<DataPointWithLabelInterface>).highestValueY
+    /** Steps go on the primary axis only when [useForScale]; otherwise on the graph's own second scale, in real units. */
+    fun addSteps(useForScale: Boolean) {
+        val stepsSeries = overviewData.stepsCountGraphSeries as PointsWithLabelGraphSeries<DataPointWithLabelInterface>
+        val maxSteps = stepsSeries.highestValueY
+        // stepsForScale is shared with the other overview graphs, which rescale it; always plot true values here.
+        overviewData.stepsForScale.multiplier = 1.0
         if (useForScale) {
             minY = 0.0
             maxY = maxSteps
+            addSeries(stepsSeries)
+        } else {
+            secondScaleRequested = true
+            val stepsFormat = NumberFormat.getIntegerInstance(Locale.US).also { it.isGroupingUsed = false }
+            graph.secondScale.labelFormatter = DefaultLabelFormatter(stepsFormat, stepsFormat)
+            secondScaleMaxY = max(secondScaleMaxY, maxSteps)
+            secondScaleSeries.add(stepsSeries)
         }
-        addSeries(overviewData.stepsCountGraphSeries as PointsWithLabelGraphSeries<DataPointWithLabelInterface>)
-        overviewData.stepsForScale.multiplier = maxY * scale / maxSteps
     }
 
     // ── V2-styled methods (overridden colours) ───────────────────────────
@@ -599,6 +614,7 @@ class BoostV2GraphData @Inject constructor(
         graph.gridLabelRenderer.gridColor = GRID_COLOR
         graph.gridLabelRenderer.horizontalLabelsColor = LABEL_COLOR
         graph.gridLabelRenderer.verticalLabelsColor = LABEL_COLOR
+        graph.gridLabelRenderer.verticalLabelsSecondScaleColor = LABEL_COLOR
     }
 
     // ── Internal plumbing ────────────────────────────────────────────────
@@ -620,7 +636,25 @@ class BoostV2GraphData @Inject constructor(
         graph.viewport.setMinY(Round.floorTo(minY, step))
         graph.viewport.isYAxisBoundsManual = true
 
+        // graph.secondScale is a lazy getter: the first access permanently reserves right-axis width,
+        // so it is only touched when this graph actually requested Steps.
+        if (secondScaleRequested) {
+            for (s in graph.secondScale.series) s.onGraphViewDetached(graph)
+            graph.secondScale.series.clear()
+            for (s in secondScaleSeries) {
+                if (!s.isEmpty) {
+                    s.onGraphViewAttached(graph)
+                    graph.secondScale.addSeries(s)
+                }
+            }
+            graph.secondScale.minY = 0.0
+            graph.secondScale.maxY = secondScaleMaxY
+        }
+
         graph.onDataChanged(false, false)
         series.clear()
+        secondScaleSeries.clear()
+        secondScaleMaxY = 1.0
+        secondScaleRequested = false
     }
 }
