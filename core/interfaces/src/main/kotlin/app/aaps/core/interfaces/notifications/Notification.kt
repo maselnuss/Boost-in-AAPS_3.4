@@ -155,6 +155,12 @@ open class Notification {
 
         const val USER_MESSAGE = 1000
 
+        // Boost V6 auto pre-meal fired: ring of IDs, one per occurrence. NotificationStore updates a same-ID
+        // notification silently (no new Android alert), and dismiss+add race on separate io subscriptions,
+        // so every occurrence gets its own ID instead.
+        const val BOOST_V6_PREMEAL_BASE = 2000
+        const val BOOST_V6_PREMEAL_SLOTS = 50
+
         const val IMPORTANCE_HIGH = 2
         const val CATEGORY_ALARM = "alarm"
     }

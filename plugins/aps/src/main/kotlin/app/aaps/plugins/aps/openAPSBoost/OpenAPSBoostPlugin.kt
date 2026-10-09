@@ -1603,6 +1603,20 @@ open class OpenAPSBoostPlugin @Inject constructor(
                     // MEAL button into CANCEL while this is fresh (goes stale by itself once the window closes).
                     if (firedViaLearnedHit) {
                         preferences.put(LongNonKey.ApsBoostPreMealWindowActiveUntilMs, now + 10 * 60_000L)
+                        // One notification per (mode, day) occurrence, not one per 5-min cycle. No action button
+                        // on purpose: NotificationStore never raises an Android system notification for one with
+                        // an action. Each occurrence uses its own ID (see Notification.BOOST_V6_PREMEAL_BASE).
+                        val occurrenceKey = "${learnedHit!!.mode.centreMin}:$nowDayType:${(now + offsetMs) / (24L * 60L * 60L * 1000L)}"
+                        if (occurrenceKey != lastPreMealNotifiedOccurrence) {
+                            lastPreMealNotifiedOccurrence = occurrenceKey
+                            val notificationId = Notification.BOOST_V6_PREMEAL_BASE + (preMealNotificationSeq++ % Notification.BOOST_V6_PREMEAL_SLOTS)
+                            uiInteraction.addNotificationValidFor(
+                                notificationId,
+                                "Boost: pre-meal target lowered to ${preMealTarget.toInt()} for your usual ~${formatClockMin(learnedHit.mode.centreMin)} meal. Not eating? Open the app and tap CANCEL.",
+                                Notification.INFO,
+                                leadMaxMin
+                            )
+                        }
                     }
                     "V6 pre-meal ACTIVE target=${preMealTarget.toInt()} ($triggerDesc); "
                 } else {
@@ -2569,6 +2583,10 @@ open class OpenAPSBoostPlugin @Inject constructor(
         return MealTimeLearner.modeKeyOf(dayType, mode.centreMin) to (tapMs + offsetMs) / (24L * 60L * 60L * 1000L)
     }
 
+    // Dedupes the auto pre-meal notification to once per (mode, day). In-memory only: after a process
+    // restart the worst case is one duplicate notification.
+    @Volatile private var lastPreMealNotifiedOccurrence: String? = null
+    private var preMealNotificationSeq = 0
     // Activity-load SHADOW — rolling 28-day PER-SOURCE daily-step history (multi-source abstraction
     // 2026-06-28; deserialize auto-migrates the old single-source blob). Persisted under the same key.
     @Volatile private var multiStepHistoryCached: DailyStepHistoryTracker.MultiSourceHistory =
