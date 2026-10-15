@@ -15,7 +15,7 @@ import kotlin.math.min
  * 45–60 min before a learned meal. Reuses [SleepHistoryTracker]'s `msToMinOfDay` / `circularMean`
  * so all time-of-day maths is midnight-wrap-safe and consistent with the sleep learner.
  *
- * **Why CONFIRMED events** (decided with Tim 2026-06-15): they are the real, already-computed
+ * **Why CONFIRMED events** (design decision, 2026-06-15): they are the real, already-computed
  * meal detector — no second detector to tune, and the histogram learns exactly what V5 treats
  * as a meal. The plugin records `decision.mealHypothesis == CONFIRMED && mealHypothesisAge == 0`.
  *
@@ -68,7 +68,7 @@ object MealTimeLearner {
     /** Circular half-width (min) for grouping events into one mode (~07:50 ± 45 → breakfast). */
     const val CLUSTER_HALF_WIDTH_MIN = 45
 
-    /** The pre-meal window always CLOSES this many minutes before the learned meal (Tim: 45–60 prior). */
+    /** The pre-meal window always CLOSES this many minutes before the learned meal (45–60 prior, by design). */
     const val PRE_MEAL_LEAD_MIN_FLOOR = 45
 
     /** Guaranteed minimum window span (min), so a low leadMax setting can't yield a zero-width window. */
@@ -187,6 +187,33 @@ object MealTimeLearner {
         val cutoff = tsMs - WINDOW_MS
         newEvents.removeAll { it.tsMs < cutoff }
         return History(newEvents)
+    }
+
+    /**
+     * True when local [minOfDay] lies in the night window `[startMin, endMin)`. A window that wraps
+     * midnight (start later than end, e.g. 22:00 to 07:00) is the union of `[start, 1440)` and
+     * `[0, end)`, so 23:30 and 03:00 are both inside and 07:00 is not. Equal times are an empty window,
+     * the same convention as [NightWindow.contains], so a misconfigured window drops nothing.
+     */
+    fun inNightMinutes(minOfDay: Int, startMin: Int, endMin: Int): Boolean = when {
+        startMin == endMin -> false
+        startMin < endMin  -> minOfDay in startMin until endMin
+        else               -> minOfDay >= startMin || minOfDay < endMin
+    }
+
+    /**
+     * [h] without the events whose local time falls inside the configured night window (2026-10-08).
+     * Before the learner was gated on the night window and the sleep detector it recorded overnight
+     * sessions, which in the field were rises with no logged carbs, mostly while the detector read
+     * SLEEPING or PRE_SLEEP; enough of them form a mode and move the lowered pre-meal target into the
+     * night. Local time uses [localOffsetMs] as [modes] does. Returns [h] itself when nothing is dropped.
+     * Manual MEAL taps are kept: they are an explicit "I am eating" (e.g. a late dinner inside the window).
+     */
+    fun withoutNightEvents(h: History, nightStartMin: Int, nightEndMin: Int, localOffsetMs: Long): History {
+        val kept = h.events.filterNot {
+            !it.manual && inNightMinutes(SleepHistoryTracker.msToMinOfDay(it.tsMs, localOffsetMs), nightStartMin, nightEndMin)
+        }
+        return if (kept.size == h.events.size) h else History(kept.toMutableList())
     }
 
     /** Smaller of clockwise / anticlockwise distance between two minute-of-day values. */
