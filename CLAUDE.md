@@ -21,7 +21,7 @@ There is no glucodynamic simulator, so we cannot generate the counterfactual BG 
 ## Methodology
 
 - **DB-first.** Use the local TimescaleDB (`oref.boost_decisions`) for analyses. Pull from Nightscout only for what the DB lacks, and wire missing fields into the extractor rather than re-pulling. NS pulls: chunk to ~7-day windows and retry with backoff (the site 502s on long windows).
-- **Backtest protocol.** Refresh the DB to t=now first. Commit scripts and reports to `backtesting/`; the scratchpad holds intermediates only, not deliverables.
+- **Backtest protocol.** Refresh the DB to t=now first. Commit scripts and reports to the `boost-experiments` repository (or a study's own repository, such as `vwatdd`), which keep the `backtesting/...` paths; Boost-AAPS-core keeps only the extractor, the Kotlin harness and `backtesting/scripts/tooling`. The scratchpad holds intermediates only, not deliverables.
 - **Out-of-sample everything.** `GroupKFold` with the *user* as the group to prevent leakage — cross-user generalisation is the honest test, not per-person memorisation. Temporal splits for time-ordered data.
 - **Matched baselines before believing an effect size.** Multiple large-looking findings dissolved under a proper baseline. Un-baselined and un-leakage-checked effect sizes are provisional.
 - **Validate before building — confidence before commitment.** No spec, shadow, or code is built on a claim until it is *freshly measured* in this session — never cited from memory, never a single lucky split. Building ahead of validation and refuting it a step later is the exact failure this rule exists to stop; it wastes effort and destroys trust.
@@ -30,7 +30,7 @@ There is no glucodynamic simulator, so we cannot generate the counterfactual BG 
 - **Small-n honesty.** Per-user samples are tiny; report per-user CIs *and* the pooled cross-user result, and never let one user or one split carry a headline.
 - **Within-subject > between-subject.** The population is small (single digits to ~30) and self-selected; cross-user results are mostly hypothesis-generating.
 - **Proximate ≠ causal.** Attribution names the mechanism at an event; it doesn't prove causation. Audit by outcome before acting on it.
-- **Don't re-litigate settled questions.** `backtesting/RELATIONSHIPS_REGISTER.md` lists what's been tested and discarded. Check it before proposing a lever.
+- **Don't re-litigate settled questions.** `backtesting/RELATIONSHIPS_REGISTER.md` in `boost-experiments` lists what's been tested and discarded. Check it before proposing a lever.
 - **Code leads.** Verify against the live code and DB before recommending. Memory and prior notes can be stale; if a memory names a file/field/flag, confirm it still exists. Auto-config not applying an expected value has bitten us more than once.
 
 ## Lab vs loop
@@ -168,7 +168,7 @@ The check that works is to read the draft aloud, to grep for the constructions a
 section headings that could be replaced by a plain noun phrase without loss.
 
 
-## Key reference docs (in `backtesting/`)
+## Key reference docs (in `backtesting/` of the `boost-experiments` repository)
 
 - `RELATIONSHIPS_REGISTER.md` — what's been tested: used, discarded, unproven. Read before proposing a lever.
 - `STATISTICAL_METHODS.md` — the methods, and where each sits (lab vs loop).
