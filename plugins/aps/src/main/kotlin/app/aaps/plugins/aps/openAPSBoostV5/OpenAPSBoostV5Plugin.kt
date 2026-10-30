@@ -23,6 +23,7 @@ import app.aaps.core.interfaces.plugin.PluginBase
 import app.aaps.core.interfaces.plugin.PluginDescription
 import app.aaps.core.interfaces.resources.ResourceHelper
 import app.aaps.core.data.model.BS
+import app.aaps.core.data.model.GlucoseUnit
 import app.aaps.core.data.model.RM
 import app.aaps.core.interfaces.constraints.ConstraintsChecker
 import app.aaps.core.interfaces.db.PersistenceLayer
@@ -30,6 +31,7 @@ import app.aaps.core.interfaces.notifications.Notification
 import app.aaps.core.interfaces.stats.TddCalculator
 import app.aaps.core.interfaces.ui.UiInteraction
 import app.aaps.core.interfaces.utils.DateUtil
+import app.aaps.core.interfaces.utils.MidnightTime
 import app.aaps.core.keys.BooleanComposedKey
 import app.aaps.core.keys.BooleanKey
 import app.aaps.core.keys.DoubleKey
@@ -38,6 +40,7 @@ import app.aaps.core.keys.LongNonKey
 import app.aaps.core.keys.StringKey
 import app.aaps.core.keys.UnitDoubleKey
 import app.aaps.core.keys.interfaces.Preferences
+import app.aaps.core.objects.profile.ProfileSealed
 import app.aaps.plugins.aps.getBoostDosing
 import app.aaps.core.validators.preferences.AdaptiveDoublePreference
 import app.aaps.core.validators.preferences.AdaptiveSwitchPreference
@@ -200,19 +203,101 @@ open class OpenAPSBoostV5Plugin @Inject constructor(
         return last == 0L || dateUtil.now() - last >= intervalMs
     }
 
+    // When the insulin-need watch last ran. In memory only: after a restart it runs once more, and
+    // the notification cooldown is persisted, so a restart cannot repeat a notification.
+    @Volatile private var lastNeedWatchAttemptMs = 0L
+
+    private fun needWatchDue(): Boolean = dateUtil.now() - lastNeedWatchAttemptMs >= NEED_WATCH_INTERVAL_MS
+
     private fun scheduleConfigEvaluation() {
-        if (!runCatching { configEvaluationDue() }.getOrDefault(false)) return
+        val configDue = runCatching { configEvaluationDue() }.getOrDefault(false)
+        val ndwDue = runCatching { needWatchDue() }.getOrDefault(false)
+        if (!configDue && !ndwDue) return
         if (!configEvaluationRunning.compareAndSet(false, true)) return   // one at a time
         configExecutor.execute {
             try {
-                runCatching { maybeAutoConfigure() }
-                    .onFailure { aapsLogger.error(LTag.APS, "BoostV5 auto-config failed (non-fatal)", it) }
-                runCatching { maybeRedrive() }
-                    .onFailure { aapsLogger.error(LTag.APS, "BoostV5 re-derivation failed (non-fatal)", it) }
+                if (configDue) {
+                    runCatching { maybeAutoConfigure() }
+                        .onFailure { aapsLogger.error(LTag.APS, "BoostV5 auto-config failed (non-fatal)", it) }
+                    runCatching { maybeRedrive() }
+                        .onFailure { aapsLogger.error(LTag.APS, "BoostV5 re-derivation failed (non-fatal)", it) }
+                }
+                if (ndwDue) {
+                    val now = dateUtil.now()
+                    lastNeedWatchAttemptMs = now
+                    runCatching { checkInsulinNeed(now) }
+                        .onFailure { aapsLogger.error(LTag.APS, "BoostV5 insulin-need watch failed (non-fatal)", it) }
+                }
             } finally {
                 configEvaluationRunning.set(false)
             }
         }
+    }
+
+    private fun replaceBreadcrumbToken(pattern: Regex, token: String) {
+        val key = StringKey.ApsBoostV5AutoConfigSummary
+        val old = preferences.getBoostDosing(key)
+        val updated = if (pattern.containsMatchIn(old)) pattern.replace(old, token) else if (old.isEmpty()) token else "$old,$token"
+        if (updated != old) preferences.put(key, updated)
+    }
+
+    /**
+     * The insulin-need watch ([InsulinNeedWatch]): the last three complete days' total daily dose
+     * against the month before, reported in the auto-config breadcrumb every day and as a
+     * notification when it lies outside two standard deviations. It changes no setting.
+     */
+    private fun checkInsulinNeed(now: Long) {
+        val dayMs = 24L * 60 * 60 * 1000
+        val span = (InsulinNeedWatch.BASELINE_DAYS + InsulinNeedWatch.WINDOW_DAYS).toLong()
+        // calculate(now, n) covers the n complete local days before today's midnight
+        val tdds = tddCalculator.calculate(now, span, allowMissingDays = true) ?: return
+        val days = ArrayList<InsulinNeedWatch.Day>()
+        for (i in 0 until tdds.size()) {
+            val start = tdds.keyAt(i)
+            val t = tdds.valueAt(i)
+            val total = if (t.totalAmount > 0) t.totalAmount else t.basalAmount + t.bolusAmount
+            val basal = runCatching {
+                persistenceLayer.getEffectiveProfileSwitchActiveAt(start + dayMs / 2)?.let {
+                    InsulinNeedWatch.profileDailyBasal(ProfileSealed.EPS(it, activePlugin).percentageBasalSum(), it.originalPercentage, it.originalDuration)
+                }
+            }.getOrNull()
+            days += InsulinNeedWatch.Day(start, total, basal)
+        }
+        days.sortBy { it.startMs }
+        val result = InsulinNeedWatch.evaluate(days, MidnightTime.calcDaysBack(now, 1))
+        replaceBreadcrumbToken(NDW_TOKEN, result.token())
+        aapsLogger.info(LTag.APS, "BoostV5 insulin-need watch: ${result.token()}")
+        val lastAbove = preferences.get(LongNonKey.ApsBoostNeedWatchLastAboveMs)
+        val lastBelow = preferences.get(LongNonKey.ApsBoostNeedWatchLastBelowMs)
+        if (!InsulinNeedWatch.shouldNotify(result, lastAbove, lastBelow, now)) return
+        val windowEnd = result.windowStartMs + InsulinNeedWatch.WINDOW_DAYS * dayMs
+        val bgs = persistenceLayer.getBgReadingsDataFromTimeToTime(result.baselineStartMs, windowEnd, true)
+            .filter { it.value >= 39.0 }
+        val recentBg = bgs.filter { it.timestamp >= result.windowStartMs }.map { it.value }.average()
+        val baseBg = bgs.filter { it.timestamp < result.windowStartMs }.map { it.value }.average()
+        notifyInsulinNeed(result, recentBg, baseBg)
+        preferences.put(
+            if (result.status == InsulinNeedWatch.Status.ABOVE) LongNonKey.ApsBoostNeedWatchLastAboveMs else LongNonKey.ApsBoostNeedWatchLastBelowMs,
+            now
+        )
+    }
+
+    private fun notifyInsulinNeed(r: InsulinNeedWatch.Result, recentBg: Double, baseBg: Double) {
+        val mmol = preferences.get(StringKey.GeneralUnits) == GlucoseUnit.MMOL.asText
+        fun bg(x: Double) = if (mmol) "%.1f mmol/L".format(java.util.Locale.ROOT, x / 18.0) else "%.0f mg/dL".format(java.util.Locale.ROOT, x)
+        val above = r.status == InsulinNeedWatch.Status.ABOVE
+        val body = buildString {
+            append("Your insulin has averaged %.1f U a day over the last ${InsulinNeedWatch.WINDOW_DAYS} days, ".format(java.util.Locale.ROOT, r.recentMeanU))
+            append("against %.1f U over the ${r.baselineDays} days before (".format(java.util.Locale.ROOT, r.baselineMeanU))
+            append("%+.0f%%, beyond twice the usual day-to-day spread of %.1f U).".format(java.util.Locale.ROOT, r.percent, r.baselineSdU))
+            if (!recentBg.isNaN() && !baseBg.isNaN()) append(" Glucose averaged ${bg(recentBg)} against ${bg(baseBg)}.")
+            append(
+                if (above) " This can mean your insulin needs have risen; eating, activity, illness or an infusion site can do the same."
+                else " This can mean your insulin needs have fallen; eating, activity or a gap in the pump record can do the same."
+            )
+            append(" In past records, about a third of a change this size was still there a week later. No setting has been changed.")
+        }
+        uiInteraction.addNotification(Notification.BOOST_NEED_WATCH, body, Notification.INFO)
     }
 
     /** Per-knob auto-config resolution marks (argument = the managed preference's key string). */
@@ -220,12 +305,20 @@ open class OpenAPSBoostV5Plugin @Inject constructor(
     private fun markResolved(prefKey: String) = preferences.put(BooleanComposedKey.BoostV5AutoConfigResolved, prefKey, value = true)
 
     /** Auto-config-managed boolean dosing switches (2026-07-17 convention: every new dosing switch is
-     *  auto-config managed). Each resolves once, suggestion-only, exactly like the double knobs. */
+     *  auto-config managed). Each resolves once at onboarding, suggestion-only, like the double knobs.
+     *  The primer route and [redrivenSwitches] are then re-evaluated by maybeRedrive on every
+     *  scheduled run; the velocity-budget floor is not, and relies on its live 14-day TBR gate. */
     private val managedBooleanKeys = listOf(
         BooleanKey.ApsBoostV5FastCarbConfirm,
         BooleanKey.ApsBoostV5AggressiveEarlyConfirm,
         BooleanKey.ApsBoostV5VelocityBudgetActive,
-        BooleanKey.ApsBoostV5PrimerTbrFallback,   // 2026-07-20 primer routing (NOT the user override, which is unmanaged)
+        BooleanKey.ApsBoostV5PrimerTbrFallback,   // primer routing; also re-evaluated weekly in maybeRedrive (NOT the user override, which is unmanaged)
+    )
+
+    /** Insulin-adding switches re-evaluated weekly by BoostV5AutoConfigApply.resolveInsulinAddingSwitch. */
+    private val redrivenSwitches = setOf(
+        BooleanKey.ApsBoostV5AggressiveEarlyConfirm,
+        BooleanKey.ApsBoostV5FastCarbConfirm,
     )
 
     private fun suggestionBoolean(s: BoostV5AutoConfig.V5Suggestion, key: BooleanKey): Boolean = when (key) {
@@ -275,21 +368,26 @@ open class OpenAPSBoostV5Plugin @Inject constructor(
         return composedFloorAllowedByTbr(cachedTbrBelow63Pct, cachedTbrBelow70Pct)
     }
 
-    // ── small JSON ledgers: what auto-config wrote, and what it is waiting to confirm ─────────
-    private fun ledger(key: StringKey): MutableMap<String, Double> {
-        val raw = preferences.get(key)
-        if (raw.isEmpty()) return mutableMapOf()
-        return runCatching {
-            val o = JSONObject(raw)
-            o.keys().asSequence().associateWith { o.getDouble(it) }.toMutableMap()
-        }.getOrElse { mutableMapOf() }
+    /**
+     * Aggressive early confirm as the engine should see it: the switch, AND the same fail-closed
+     * trailing-14-day TBR gate the composed floor and the velocity-budget floor use. The switch is
+     * insulin-adding and auto-config only revisits it weekly, so this is the live backstop for a
+     * person whose time below range rises between re-derivations, or who turned it on by hand.
+     * The 14-day read is skipped while the switch is off.
+     */
+    internal fun aggressiveEarlyConfirmLive(now: Long): Boolean {
+        if (!preferences.getBoostDosing(BooleanKey.ApsBoostV5AggressiveEarlyConfirm)) return false
+        composedFloorTbrAllowed(now)   // refreshes the hourly cache
+        return aggressiveEarlyConfirmAllowed(true, cachedTbrBelow63Pct, cachedTbrBelow70Pct)
     }
 
-    private fun ledgerPut(key: StringKey, prefKey: String, value: Double?) {
-        val m = ledger(key)
-        if (value == null) m.remove(prefKey) else m[prefKey] = value
-        preferences.put(key, JSONObject(m as Map<*, *>).toString())
-    }
+    // ── small JSON ledgers: what auto-config wrote, and what it is waiting to confirm ─────────
+    // Read unmasked (AutoConfigLedger): the keys are defaultedBySM, and a masked read in Simple Mode
+    // made every re-derivation a first sight that never moved anything.
+    private fun ledger(key: StringKey): MutableMap<String, Double> = AutoConfigLedger.read(preferences, key)
+
+    private fun ledgerPut(key: StringKey, prefKey: String, value: Double?) =
+        AutoConfigLedger.put(preferences, key, prefKey, value)
 
     /**
      * Record a re-derivation that did NOT change anything, and why. rev 1 returned silently from two
@@ -352,6 +450,7 @@ open class OpenAPSBoostV5Plugin @Inject constructor(
 
         val baselines = redriveBaselines()
         val pending = ledger(StringKey.ApsBoostV5AutoConfigPending)
+        val written = writtenLedger()
         val res = synchronized(configLock) { BoostV5AutoConfigApply.redrive(
             suggestion, tbrBelow70Pct = g.tbr70, timeBelow54Pct = g.sev54,
             storedValue = { preferences.getIfExists(it) },
@@ -359,14 +458,69 @@ open class OpenAPSBoostV5Plugin @Inject constructor(
             pendingValue = { pending[it.key] },
             put = { key, value -> preferences.put(key, value) },
             setBaseline = { key, value -> setRedriveBaseline(key, value) },
-            setPending = { key, value -> ledgerPut(StringKey.ApsBoostV5AutoConfigPending, key.key, value) }
+            setPending = { key, value -> ledgerPut(StringKey.ApsBoostV5AutoConfigPending, key.key, value) },
+            lastWritten = { written[it.key] },
+            recordWritten = { key, value -> recordWritten(key, value) }
         ) }
         res.forEach { aapsLogger.info(LTag.APS, "BoostV5 re-derivation: ${it.key.key} → ${it.reason}") }
 
+        // Primer delivery route, from this window's well-controlled verdict (the derivation's own
+        // primerTbrFallback is its negation). See BoostV5AutoConfigApply.resolvePrimerRoute.
+        val routeKey = BooleanKey.ApsBoostV5PrimerTbrFallback
+        val windowWellControlled = !suggestion.primerTbrFallback
+        val route = synchronized(configLock) { BoostV5AutoConfigApply.resolvePrimerRoute(
+            wellControlled = windowWellControlled,
+            bgReadings = g.bgCount,
+            previousWellControlled = pending[BoostV5AutoConfigApply.PRIMER_ROUTE_PREV_WC_KEY]?.let { it >= 0.5 },
+            stored = preferences.getIfExists(routeKey),
+            lastWritten = written[routeKey.key]?.let { it >= 0.5 },
+            put = { preferences.put(routeKey, it) },
+            recordWritten = { ledgerPut(StringKey.ApsBoostV5AutoConfigWritten, routeKey.key, if (it) 1.0 else 0.0) },
+            recordWellControlled = { wc ->
+                ledgerPut(StringKey.ApsBoostV5AutoConfigPending, BoostV5AutoConfigApply.PRIMER_ROUTE_PREV_WC_KEY, wc?.let { if (it) 1.0 else 0.0 })
+            }
+        ) }
+        aapsLogger.info(LTag.APS, "BoostV5 re-derivation: ${routeKey.key} → ${route.reason}")
+        val routeChanged = route.outcome == BoostV5AutoConfigApply.Outcome.REDRIVEN
+
+        // Insulin-adding switches, by the same rules as the primer route: off on the first window
+        // that does not allow them, on only after two consecutive windows that do and never under
+        // the TBR guard, never over a value the user set. See resolveInsulinAddingSwitch.
+        val raiseGuard = g.tbr70 > BoostV5AutoConfigApply.TBR_RAISE_GUARD_PCT ||
+            g.sev54 >= BoostV5AutoConfigApply.TBR54_RAISE_GUARD_PCT
+        val switches = listOf(
+            Triple("aec", BooleanKey.ApsBoostV5AggressiveEarlyConfirm, suggestion.aggressiveEarlyConfirm),
+            Triple("fcc", BooleanKey.ApsBoostV5FastCarbConfirm, suggestion.fastCarbConfirm)
+        ).map { (tag, key, allowsOn) ->
+            val verdictKey = BoostV5AutoConfigApply.switchPreviousVerdictKey(key.key)
+            val r = synchronized(configLock) { BoostV5AutoConfigApply.resolveInsulinAddingSwitch(
+                allowsOn = allowsOn,
+                raiseGuard = raiseGuard,
+                bgReadings = g.bgCount,
+                previousAllowsOn = pending[verdictKey]?.let { it >= 0.5 },
+                stored = preferences.getIfExists(key),
+                defaultValue = key.defaultValue,
+                lastWritten = written[key.key]?.takeIf { it >= 0.0 }?.let { it >= 0.5 },
+                userMarked = written[key.key] == BoostV5AutoConfigApply.SWITCH_USER_SET_MARK,
+                put = { preferences.put(key, it) },
+                recordWritten = { ledgerPut(StringKey.ApsBoostV5AutoConfigWritten, key.key, if (it) 1.0 else 0.0) },
+                recordVerdict = { v -> ledgerPut(StringKey.ApsBoostV5AutoConfigPending, verdictKey, v?.let { if (it) 1.0 else 0.0 }) }
+            ) }
+            aapsLogger.info(LTag.APS, "BoostV5 re-derivation: ${key.key} → ${r.reason}")
+            Triple(tag, key, r) to allowsOn
+        }
+        val switchesChanged = switches.filter { it.first.third.outcome == BoostV5AutoConfigApply.Outcome.REDRIVEN }
+
+        val trancheKey = DoubleKey.ApsBoostV5TrancheThreshold
         fun shortName(k: DoubleKey) = k.name.removePrefix("ApsBoostV5").removePrefix("ApsBoost")
+        fun unit(k: DoubleKey) = if (k == trancheKey) "" else " U"
         val changed = res.filter { it.outcome == BoostV5AutoConfigApply.Outcome.REDRIVEN }
         val held = res.filter { it.outcome == BoostV5AutoConfigApply.Outcome.SUGGESTED_NOT_APPLIED_TBR }
         val retired = res.filter { it.outcome == BoostV5AutoConfigApply.Outcome.RETIRED_USER_EDITED }
+        // Computed knobs (cumulative cap, primer) the user set and the re-derivation therefore left
+        // alone. The tranche threshold reports its own kept outcome inside tr=.
+        val kept = res.filter { it.outcome == BoostV5AutoConfigApply.Outcome.KEPT_USER_TUNED && it.key != trancheKey }
+        val tranche = res.lastOrNull { it.key == trancheKey }
 
         // Breadcrumb replayed into the reason every cycle (see OpenAPSBoostPlugin autordv=).
         preferences.put(
@@ -375,24 +529,41 @@ open class OpenAPSBoostV5Plugin @Inject constructor(
                 ",ev=${res.size},ch=${changed.size}" +
                 changed.joinToString("") { ",${shortName(it.key)}:${it.operativeValue}" } +
                 (if (held.isEmpty()) "" else held.joinToString("") { ",held-${shortName(it.key)}:${it.suggestedValue}" }) +
-                (if (retired.isEmpty()) "" else retired.joinToString("") { ",retired-${shortName(it.key)}" })
+                (if (retired.isEmpty()) "" else retired.joinToString("") { ",retired-${shortName(it.key)}" }) +
+                (if (kept.isEmpty()) "" else kept.joinToString("") { ",kept-${shortName(it.key)}:${it.operativeValue}" }) +
+                (if (tranche == null) "" else "," + BoostV5AutoConfigApply.trancheBreadcrumb(tranche, suggestion.tranche)) +
+                "," + BoostV5AutoConfigApply.primerRouteBreadcrumb(route, windowWellControlled) +
+                switches.joinToString("") { (t, allowsOn) -> "," + BoostV5AutoConfigApply.switchBreadcrumb(t.first, t.third, allowsOn) }
         )
 
-        if (changed.isNotEmpty() || held.isNotEmpty()) {
+        fun switchName(k: BooleanKey) = k.name.removePrefix("ApsBoostV5")
+        if (changed.isNotEmpty() || held.isNotEmpty() || routeChanged || switchesChanged.isNotEmpty()) {
             // Rolling in-app history so this is answerable after the notification is dismissed.
-            val line = changed.joinToString("; ") { "${shortName(it.key)} ${it.suggestedValue} (was ${it.operativeValue})" }
+            val line = (changed.map { "${shortName(it.key)} ${it.suggestedValue} (was ${it.operativeValue})" } +
+                (if (routeChanged) listOf("PrimerRoute ${if (route.tbrFallback) "temp basal" else "bolus"}") else emptyList()) +
+                switchesChanged.map { (t, _) -> "${switchName(t.second)} ${if (t.third.value) "on" else "off"}" })
+                .joinToString("; ")
             val entry = "${dateUtil.toISOString(now)} ${if (line.isEmpty()) "held only" else line}"
-            val hist = (listOf(entry) + preferences.get(StringKey.ApsBoostV5RedriveHistory)
+            val hist = (listOf(entry) + AutoConfigLedger.text(preferences, StringKey.ApsBoostV5RedriveHistory)
                 .split("\n").filter { it.isNotBlank() }).take(10)
             preferences.put(StringKey.ApsBoostV5RedriveHistory, hist.joinToString("\n"))
 
             val body = buildString {
                 append("Boost re-checked your settings against the last ${BoostV5AutoConfig.REDRIVE_LOOKBACK_DAYS} days")
-                if (changed.isNotEmpty()) {
-                    append(" and changed ${changed.size}:\n")
-                    append(changed.joinToString("\n") { "• ${shortName(it.key)} → ${it.operativeValue} U" })
+                if (changed.isNotEmpty() || routeChanged || switchesChanged.isNotEmpty()) {
+                    append(" and changed ${changed.size + (if (routeChanged) 1 else 0) + switchesChanged.size}:\n")
+                    val lines = changed.map { "• ${shortName(it.key)} → ${it.operativeValue}${unit(it.key)}" } +
+                        (if (!routeChanged) emptyList() else listOf(
+                            if (route.tbrFallback) "• Primer now given as a temp basal: time below range is above the well-controlled cut"
+                            else "• Primer now given as a bolus: two consecutive windows within the well-controlled cut"
+                        )) +
+                        switchesChanged.map { (t, _) ->
+                            if (t.third.value) "• ${switchName(t.second)} switched on: two consecutive windows allow it"
+                            else "• ${switchName(t.second)} switched off: the last ${BoostV5AutoConfig.REDRIVE_LOOKBACK_DAYS} days no longer allow it"
+                        }
+                    append(lines.joinToString("\n"))
                 }
-                held.forEach { append("\n• ${shortName(it.key)}: ${it.suggestedValue} U suggested, held back (time-below-range)") }
+                held.forEach { append("\n• ${shortName(it.key)}: ${it.suggestedValue}${unit(it.key)} suggested, held back (time-below-range)") }
             }
             uiInteraction.addNotification(Notification.USER_MESSAGE, body, Notification.INFO)
         }
@@ -445,12 +616,42 @@ open class OpenAPSBoostV5Plugin @Inject constructor(
                 manualBolusesU = manual, smbAmountsU = smb,
                 tbrBelow70Pct = tbr70, timeBelow54Pct = sev54, meanGlucoseMgdl = meanBg,
                 currentMaxIobU = constraintsChecker.getMaxIOBAllowed().value(),
-                currentMaxBolusU = constraintsChecker.getMaxBolusAllowed().value()
+                currentMaxBolusU = constraintsChecker.getMaxBolusAllowed().value(),
+                tranche = runCatching { gatherTrancheDerivation(now) }
+                    .onFailure { aapsLogger.error(LTag.APS, "BoostV5 tranche derivation failed (non-fatal)", it) }
+                    .getOrNull()
             ),
             daysWithData = tddValues.size, bgCount = n, bolusCount = boluses.size,
             tbr70 = tbr70, sev54 = sev54
         )
     }
+
+    /**
+     * The person's confirm episodes over [TrancheThresholdDeriver.LOOKBACK_DAYS], scored for the
+     * tranche threshold. The cycle stream is the stored APS results: every cycle on which the V6
+     * override was active carries its meal-hypothesis state, so confirm onsets are counted cycle by
+     * cycle at whatever cadence the loop runs. The results are read a day at a time because each
+     * one decodes several JSON blobs and a one-minute loop stores 1,440 a day.
+     */
+    private fun gatherTrancheDerivation(now: Long): TrancheThresholdDeriver.Derivation {
+        val dayMs = 24L * 60 * 60 * 1000
+        val start = now - TrancheThresholdDeriver.LOOKBACK_DAYS * dayMs
+        val cycles = ArrayList<Pair<Long, String?>>()
+        var from = start
+        while (from < now) {
+            val to = minOf(from + dayMs, now)
+            for (r in persistenceLayer.getApsResults(from, to - 1)) {
+                val rt = r.rawData() as? RT ?: continue
+                if (rt.boostV5_active == true && rt.boostV5_state != null) cycles += r.date to rt.boostV5_state
+            }
+            from = to
+        }
+        val glucose = persistenceLayer.getBgReadingsDataFromTimeToTime(start, now, true).map { it.timestamp to it.value }
+        return TrancheThresholdDeriver.derive(TrancheThresholdDeriver.confirmOnsets(cycles), glucose)
+    }
+
+    private fun writtenLedger() = ledger(StringKey.ApsBoostV5AutoConfigWritten)
+    private fun recordWritten(key: DoubleKey, value: Double) = ledgerPut(StringKey.ApsBoostV5AutoConfigWritten, key.key, value)
 
     private fun maybeAutoConfigure() {
         // Migration from the legacy global one-shot flag (raw read — get() would mask it in simple
@@ -530,6 +731,7 @@ open class OpenAPSBoostV5Plugin @Inject constructor(
         // suggested-not-applied) exactly once (see BoostV5AutoConfigApply, unit-tested). Dose-cap
         // RAISES are held back (suggestion-only) when TBR<70 exceeds the guard threshold; the
         // cumulative cap is recomputed inside from the final operative per-shot caps.
+        val written = writtenLedger()
         val resolutions = synchronized(configLock) { BoostV5AutoConfigApply.applyAutoConfig(
             suggestion,
             tbrBelow70Pct = tbr70,
@@ -537,7 +739,9 @@ open class OpenAPSBoostV5Plugin @Inject constructor(
             isResolved = { isResolved(it.key) },
             storedValue = { preferences.getIfExists(it) },
             put = { key, value -> preferences.put(key, value) },
-            markResolved = { markResolved(it.key) }
+            markResolved = { markResolved(it.key) },
+            lastWritten = { written[it.key] },
+            recordWritten = { key, value -> recordWritten(key, value) }
         ) }
         // Log every classification verbatim so field diagnosis never needs inference.
         fun shortName(key: DoubleKey) = key.name.removePrefix("ApsBoostV5").removePrefix("ApsBoost")
@@ -553,7 +757,14 @@ open class OpenAPSBoostV5Plugin @Inject constructor(
             val stored = preferences.getIfExists(bk)
             if (stored == null || stored == bk.defaultValue) {
                 preferences.put(bk, value)
-                if (value != bk.defaultValue) applied += "${bk.name.removePrefix("ApsBoostV5")}=$value"
+                // Recorded so the re-derivation can tell its own value from one set by someone else
+                // (used by the primer route, see BoostV5AutoConfigApply.resolvePrimerRoute).
+                ledgerPut(StringKey.ApsBoostV5AutoConfigWritten, bk.key, if (value) 1.0 else 0.0)
+                if (value != bk.defaultValue) applied +="${bk.name.removePrefix("ApsBoostV5")}=$value"
+            } else if (bk in redrivenSwitches) {
+                // Off its factory default before onboarding: the user's, so the weekly
+                // re-derivation must never change it (BoostV5AutoConfigApply.resolveInsulinAddingSwitch).
+                ledgerPut(StringKey.ApsBoostV5AutoConfigWritten, bk.key, BoostV5AutoConfigApply.SWITCH_USER_SET_MARK)
             }
             markResolved(bk.key)
         }
@@ -583,7 +794,9 @@ open class OpenAPSBoostV5Plugin @Inject constructor(
         preferences.put(
             StringKey.ApsBoostV5AutoConfigSummary,
             "applied=${applied.size},heldTBR=${heldSuggestions.size},keptUser=$keptCount" +
-                "@${dateUtil.toISOString(now)}" + if (heldDetail.isNotEmpty()) ",held=$heldDetail" else ""
+                "@${dateUtil.toISOString(now)}" + (if (heldDetail.isNotEmpty()) ",held=$heldDetail" else "") +
+                (resolutions.lastOrNull { it.key == DoubleKey.ApsBoostV5TrancheThreshold }
+                    ?.let { "," + BoostV5AutoConfigApply.trancheBreadcrumb(it, suggestion.tranche) } ?: "")
         )
         if (applied.isNotEmpty() || heldSuggestions.isNotEmpty()) {
             val pretty = (applied + heldSuggestions).joinToString("\n") { "• $it" }
@@ -904,7 +1117,7 @@ open class OpenAPSBoostV5Plugin @Inject constructor(
             // 2026-07-17 aggressive early-confirm — opt-in + auto-config managed (age −2). Read raw
             // (mask-bypassed) like the other dosing toggles; applies in BOTH shadow and active modes
             // (it changes the state transition, not the delivered dose directly).
-            aggressiveEarlyConfirmEnabled = preferences.getBoostDosing(BooleanKey.ApsBoostV5AggressiveEarlyConfirm),
+            aggressiveEarlyConfirmEnabled = aggressiveEarlyConfirmLive(dateUtil.now()),
             sensorQualityOk = if (activeMode) !flatBGsDetected else true,
             // 2026-10-08 (audit item 17): reset triggers wired to the running mode and the profile
             // switch record. The time jump is derived in decide() from the persisted state's own clock.
@@ -1074,7 +1287,8 @@ open class OpenAPSBoostV5Plugin @Inject constructor(
             addPreference(AdaptiveSwitchPreference(ctx = context, booleanKey = BooleanKey.ApsBoostV5VelocityBudgetActive, summary = R.string.boost_v5_velocity_budget_summary, title = R.string.boost_v5_velocity_budget_title))
             addPreference(AdaptiveDoublePreference(ctx = context, doubleKey = DoubleKey.ApsBoostV5PrimerCapU, dialogMessage = R.string.boost_v5_primer_cap_summary, title = R.string.boost_v5_primer_cap_title))
             addPreference(AdaptiveSwitchPreference(ctx = context, booleanKey = BooleanKey.ApsBoostV5PrimerBolusMode, summary = R.string.boost_v5_primer_bolus_mode_summary, title = R.string.boost_v5_primer_bolus_mode_title))
-            // TEST BUILD ONLY — remove these three before release; auto-config owns them.
+            // Confirm tranche. The switch and the fraction are user settings. The threshold is written
+            // by auto-config from the person's own confirm episodes; a value set here by hand is kept.
             addPreference(AdaptiveSwitchPreference(ctx = context, booleanKey = BooleanKey.ApsBoostV5ConfirmTranche, summary = R.string.boost_v5_confirm_tranche_summary, title = R.string.boost_v5_confirm_tranche_title))
             addPreference(AdaptiveDoublePreference(ctx = context, doubleKey = DoubleKey.ApsBoostV5TrancheFraction, dialogMessage = R.string.boost_v5_tranche_fraction_summary, title = R.string.boost_v5_tranche_fraction_title))
             addPreference(AdaptiveDoublePreference(ctx = context, doubleKey = DoubleKey.ApsBoostV5TrancheThreshold, dialogMessage = R.string.boost_v5_tranche_threshold_summary, title = R.string.boost_v5_tranche_threshold_title))
@@ -1088,3 +1302,14 @@ open class OpenAPSBoostV5Plugin @Inject constructor(
         category.addPreference(advanced)
     }
 }
+
+/**
+ * Whether aggressive early confirm may run: the user's or auto-config's switch, gated on the
+ * composed floor's fail-closed 14-day TBR test (TBR<63 under 2.0% and TBR<70 under 3.5%; a null
+ * percentage, meaning too little CGM history, blocks it).
+ */
+internal fun aggressiveEarlyConfirmAllowed(switchOn: Boolean, tbrBelow63Pct: Double?, tbrBelow70Pct: Double?): Boolean =
+    switchOn && composedFloorAllowedByTbr(tbrBelow63Pct, tbrBelow70Pct)
+
+private const val NEED_WATCH_INTERVAL_MS = 24L * 60 * 60 * 1000
+private val NDW_TOKEN = Regex("ndw=[A-Z_]+(/[a-z]=[^,/]+)*")

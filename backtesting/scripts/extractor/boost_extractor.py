@@ -69,6 +69,10 @@ AUTORDV_RE = re.compile(r"autordv=([^;]+);")
 # emitted every cycle (not only when the guard fired), so exposure is countable on days the
 # guard never engaged. Pre-reg: backtesting/protocols/2026-08_postrescue_tight_ramp_PREREG.md
 PRTRIAL_RE = re.compile(r"prTrial=([^;]+);")
+# 2026-10-23 infusion-site and reservoir age, hours, every cycle: "siteAge=<h>; resAge=<h>;" ("-" when
+# no change is recorded). See backtesting/scripts/2026-10-self-patterns/SITE_CYCLE_ALGORITHM_OPTIONS.md.
+SITE_AGE_RE = re.compile(r"siteAge=([0-9.]+);")
+RES_AGE_RE = re.compile(r"resAge=([0-9.]+);")
 ANTBACKOUT_RE = re.compile(r"antBackout=([^;]+);")
 ANTICIP_RE = re.compile(r"anticip=([^;]+);")
 
@@ -618,6 +622,8 @@ def build_row(rec: dict, user_id: str) -> Optional[dict]:
         "prtrial_enrolled": _prtrial(reason, 0, int),
         "prtrial_arm": _prtrial(reason, 1, str),
         "prtrial_cap": _prtrial(reason, 2),
+        "site_age_h": (lambda m: float(m.group(1)) if m else None)(SITE_AGE_RE.search(reason or "")),
+        "reservoir_age_h": (lambda m: float(m.group(1)) if m else None)(RES_AGE_RE.search(reason or "")),
         # 2026-07-20 anticipatory back-out controller SHADOW (read-only; BACKOUT_CONTROLLER_SPEC.md).
         "antbackout_state": _antb(reason, 0, str),
         "antbackout_ra0": _antb(reason, 1), "antbackout_ranow": _antb(reason, 2),
@@ -858,6 +864,8 @@ ALTER TABLE {TABLE} ADD COLUMN IF NOT EXISTS autordv_changes            text;
 ALTER TABLE {TABLE} ADD COLUMN IF NOT EXISTS prtrial_enrolled           integer;
 ALTER TABLE {TABLE} ADD COLUMN IF NOT EXISTS prtrial_arm                text;
 ALTER TABLE {TABLE} ADD COLUMN IF NOT EXISTS prtrial_cap                double precision;
+ALTER TABLE {TABLE} ADD COLUMN IF NOT EXISTS site_age_h                 double precision;
+ALTER TABLE {TABLE} ADD COLUMN IF NOT EXISTS reservoir_age_h            double precision;
 ALTER TABLE {TABLE} ADD COLUMN IF NOT EXISTS antbackout_state           text;
 ALTER TABLE {TABLE} ADD COLUMN IF NOT EXISTS antbackout_ra0             double precision;
 ALTER TABLE {TABLE} ADD COLUMN IF NOT EXISTS antbackout_ranow           double precision;

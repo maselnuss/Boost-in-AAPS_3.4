@@ -18,8 +18,12 @@ class BoostV5AutoConfigTest {
         manual: List<Double> = listOf(3.0, 3.5, 4.0, 4.0, 4.5, 5.0, 5.0, 5.5, 6.0, 6.0),
         smb: List<Double> = listOf(0.2, 0.3, 0.4, 0.6, 0.8),
         tbr70: Double = 3.0, sev54: Double = 0.4, meanBg: Double = 130.0,
-        maxIob: Double = 8.0, maxBolus: Double = 10.0
-    ) = BoostV5AutoConfig.V1Profile(days, bg, tdd, manual, smb, tbr70, sev54, meanBg, maxIob, maxBolus)
+        maxIob: Double = 8.0, maxBolus: Double = 10.0,
+        // A derivation that raises the threshold, so the default fixture exercises every managed knob.
+        tranche: TrancheThresholdDeriver.Derivation? = TrancheThresholdDeriver.Derivation(
+            emptyList(), nSmall = 20, nLarge = 20, threshold = 0.60, youdenJ = 0.7,
+            shortfall = TrancheThresholdDeriver.Shortfall.NONE)
+    ) = BoostV5AutoConfig.V1Profile(days, bg, tdd, manual, smb, tbr70, sev54, meanBg, maxIob, maxBolus, tranche)
 
     @Test fun `insufficient days returns null`() {
         assertThat(BoostV5AutoConfig.compute(profile(days = 5))).isNull()
@@ -195,7 +199,7 @@ class BoostV5AutoConfigTest {
             DoubleKey.ApsBoostV5Aggression, DoubleKey.ApsBoostV5HypoCaution,
             DoubleKey.ApsBoostV5ConfirmedCapU, DoubleKey.ApsBoostV5CommittedCapU,
             DoubleKey.ApsBoostCumulativeSmbCap60Min, DoubleKey.ApsBoostMaxIob, DoubleKey.ApsBoostBolus,
-            DoubleKey.ApsBoostV5PrimerCapU
+            DoubleKey.ApsBoostV5PrimerCapU, DoubleKey.ApsBoostV5TrancheThreshold
         )
     }
 

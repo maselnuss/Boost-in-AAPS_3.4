@@ -87,10 +87,13 @@ enum class DoubleKey(
 
     // 2026-08-27 confirm tranche. Fraction delivered at the confirming cycle; the remainder is held
     // for ten minutes and released only if the release rule clears the threshold. A fraction of 1.0
-    // makes the whole thing inert. Threshold: raising it withholds more, which is a TIGHTENING, so
-    // the auto-config raise guard already points the right way. Population median is 0.48 and the
-    // per-participant best runs 0.30 to 0.65, uninferable from anything cheap (r = -0.32 against a
-    // participant's own share of large excursions), so it is derived from their own episodes.
+    // makes the whole thing inert. The fraction is a user setting and auto-config does not touch it.
+    // Threshold: population median 0.48, per-participant best 0.30 to 0.65, uninferable from anything
+    // cheap (r = -0.32 against a participant's own share of large excursions). Auto-config derives it
+    // from the person's own confirm episodes over 45 days (TrancheThresholdDeriver) on onboarding and
+    // on every weekly re-derivation. Raising it withholds more, a tightening, and applies on its own.
+    // Auto-config does not lower it while TRANCHE_ALLOW_LOWERING is false, because the derivation is
+    // biased down once the tranche runs (BoostV5AutoConfigApply.resolveTrancheThreshold). A value set by hand is kept.
     ApsBoostV5TrancheFraction("boost_v5_tranche_fraction", 0.5, 0.3, 1.0, defaultedBySM = true),
     ApsBoostV5TrancheThreshold("boost_v5_tranche_threshold", 0.48, 0.20, 0.80, defaultedBySM = true),
     // 2026-07-20 V1-acceleration early primer: the per-user fizzle-safe base (additive allowance,

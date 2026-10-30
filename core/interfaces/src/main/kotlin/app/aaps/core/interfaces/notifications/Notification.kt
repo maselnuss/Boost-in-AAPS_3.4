@@ -154,6 +154,9 @@ open class Notification {
         const val LOOP_STALE = 95
 
         const val USER_MESSAGE = 1000
+        // Boost insulin-need watch (2026-10-20). Its own id, because NotificationStore keeps the text of
+        // an existing notification with the same id and USER_MESSAGE is shared by several Boost notices.
+        const val BOOST_NEED_WATCH = 1001
 
         // Boost V6 auto pre-meal fired: ring of IDs, one per occurrence. NotificationStore updates a same-ID
         // notification silently (no new Android alert), and dismiss+add race on separate io subscriptions,

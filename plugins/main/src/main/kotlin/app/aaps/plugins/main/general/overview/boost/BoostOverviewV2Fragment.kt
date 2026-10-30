@@ -21,6 +21,7 @@ import androidx.recyclerview.widget.LinearLayoutManager
 import app.aaps.core.data.model.GlucoseUnit
 import app.aaps.core.data.model.RM
 import app.aaps.core.data.model.TE
+import app.aaps.core.data.pump.defs.PumpType
 import app.aaps.core.data.ue.Action
 import app.aaps.core.data.ue.Sources
 import app.aaps.core.graph.data.GraphViewWithCleanup
@@ -33,6 +34,8 @@ import app.aaps.core.interfaces.iob.IobCobCalculator
 import app.aaps.core.interfaces.logging.AAPSLogger
 import app.aaps.core.interfaces.logging.LTag
 import app.aaps.core.interfaces.logging.UserEntryLogger
+import app.aaps.core.interfaces.nsclient.NSSettingsStatus
+import app.aaps.core.interfaces.nsclient.ProcessedDeviceStatusData
 import app.aaps.core.interfaces.overview.LastBgData
 import app.aaps.core.interfaces.overview.OverviewData
 import app.aaps.core.interfaces.overview.OverviewMenus
@@ -59,6 +62,7 @@ import app.aaps.core.interfaces.rx.events.EventRunningModeChange
 import app.aaps.core.interfaces.rx.events.EventScale
 import app.aaps.core.interfaces.rx.events.EventTempBasalChange
 import app.aaps.core.interfaces.rx.events.EventTempTargetChange
+import app.aaps.core.interfaces.rx.events.EventTherapyEventChange
 import app.aaps.core.interfaces.rx.events.EventWearUpdateTiles
 import app.aaps.core.interfaces.rx.events.EventUpdateOverviewCalcProgress
 import app.aaps.core.interfaces.rx.events.EventUpdateOverviewGraph
@@ -141,6 +145,8 @@ class BoostOverviewV2Fragment : DaggerFragment(), View.OnClickListener {
     @Inject lateinit var xDripSource: XDripSource
     @Inject lateinit var uel: UserEntryLogger
     @Inject lateinit var warnColors: WarnColors
+    @Inject lateinit var processedDeviceStatusData: ProcessedDeviceStatusData
+    @Inject lateinit var nsSettingsStatus: NSSettingsStatus
 
     // --- State ---
 
@@ -242,6 +248,7 @@ class BoostOverviewV2Fragment : DaggerFragment(), View.OnClickListener {
         binding.v2BtnTreatment.setOnClickListener(this)
         binding.v2BtnCalibration.setOnClickListener(this)
         binding.v2BtnCgm.setOnClickListener(this)
+        arrangeActionButtons()
 
         // MEAL button (pref ApsBoostShowMealButton)
         binding.v2BtnMeal.setOnClickListener(this)
@@ -286,6 +293,16 @@ class BoostOverviewV2Fragment : DaggerFragment(), View.OnClickListener {
             .debounce(1L, TimeUnit.SECONDS)
             .observeOn(aapsSchedulers.main)
             .subscribe({ updateGraph() }, fabricPrivacy::logException)
+        if (config.AAPSCLIENT) {
+            // In AAPSClient a new Nightscout device status ends in EventUpdateOverviewGraph
+            // (NSDeviceStatusHandler -> runOnReceivedPredictions -> UpdateGraphWorker); it is the
+            // only signal that the main phone's pump and uploader battery have changed.
+            disposable += activePlugin.activeOverview.overviewBus
+                .toObservable(EventUpdateOverviewGraph::class.java)
+                .debounce(1L, TimeUnit.SECONDS)
+                .observeOn(aapsSchedulers.io)
+                .subscribe({ updatePumpInfo() }, fabricPrivacy::logException)
+        }
         disposable += activePlugin.activeOverview.overviewBus
             .toObservable(EventUpdateOverviewNotification::class.java)
             .observeOn(aapsSchedulers.main)
@@ -318,6 +335,22 @@ class BoostOverviewV2Fragment : DaggerFragment(), View.OnClickListener {
             .subscribe({
                 context?.let { ctx -> overviewData.pumpStatus = it.getStatus(ctx) }
                 updatePumpStatus()
+            }, fabricPrivacy::logException)
+        // The driver updates its battery and reservoir as it reads the pump; refresh the pump column
+        // once the status burst settles rather than waiting for the 60 s loop.
+        disposable += rxBus
+            .toObservable(EventPumpStatusChanged::class.java)
+            .debounce(1L, TimeUnit.SECONDS)
+            .observeOn(aapsSchedulers.io)
+            .subscribe({ updatePumpInfo() }, fabricPrivacy::logException)
+        // A logged battery, cannula or sensor change moves the ages shown in the pump column.
+        disposable += rxBus
+            .toObservable(EventTherapyEventChange::class.java)
+            .debounce(1L, TimeUnit.SECONDS)
+            .observeOn(aapsSchedulers.io)
+            .subscribe({
+                boostHelper.invalidate()
+                updatePumpInfo()
             }, fabricPrivacy::logException)
         disposable += rxBus
             .toObservable(EventNewOpenLoopNotification::class.java)
@@ -818,6 +851,12 @@ class BoostOverviewV2Fragment : DaggerFragment(), View.OnClickListener {
         if (!isAdded) return
         val pump = activePlugin.activePump
         val boostStatus = cached ?: boostHelper.getBoostStatus()
+        // Database lookups stay off the main thread; only the view writes go to it.
+        val cannulaTE = persistenceLayer.getLastTherapyRecordUpToNow(TE.Type.CANNULA_CHANGE)
+        val sensorTE = persistenceLayer.getLastTherapyRecordUpToNow(TE.Type.SENSOR_CHANGE)
+        val batteryTE = persistenceLayer.getLastTherapyRecordUpToNow(TE.Type.PUMP_BATTERY_CHANGE)
+        val battery = pumpBatteryReading(pump, batteryTE?.timestamp)
+        val phoneBattery = uploaderBatteryReading()
         runOnUiThread {
             _binding ?: return@runOnUiThread
             val res = pump.reservoirLevel
@@ -832,8 +871,20 @@ class BoostOverviewV2Fragment : DaggerFragment(), View.OnClickListener {
                 binding.v2PumpReservoir.text = "---"
             }
 
-            val bat = pump.batteryLevel
-            binding.v2PumpBattery.text = if (bat != null) "${bat}%" else "---"
+            binding.v2PumpBatteryRow.visibility = battery.visible.toVisibility()
+            binding.v2PumpBattery.text = battery.text
+            when (battery.kind) {
+                BoostBatteryDisplay.Kind.PERCENT ->
+                    warnColors.setColorInverse(binding.v2PumpBattery, (battery.percent ?: 0).toDouble(),
+                        preferences.get(IntKey.OverviewBattWarning), preferences.get(IntKey.OverviewBattCritical))
+                BoostBatteryDisplay.Kind.AGE     ->
+                    if (batteryTE != null) warnColors.setColorByAge(binding.v2PumpBattery, batteryTE,
+                        preferences.get(IntKey.OverviewBageWarning), preferences.get(IntKey.OverviewBageCritical))
+                else                             -> binding.v2PumpBattery.setTextColor(Color.parseColor("#aaaaaa"))
+            }
+
+            binding.v2PhoneBatteryRow.visibility = phoneBattery.visible.toVisibility()
+            binding.v2PhoneBattery.text = phoneBattery.text
 
             val cStr = formatAgeDaysHours(boostStatus.cannulaAgeDays)
             val sStr = formatAgeDaysHours(boostStatus.sensorAgeDays)
@@ -841,8 +892,6 @@ class BoostOverviewV2Fragment : DaggerFragment(), View.OnClickListener {
             binding.v2PumpSensorAge.text = sStr
 
             // Apply warning colours
-            val cannulaTE = persistenceLayer.getLastTherapyRecordUpToNow(TE.Type.CANNULA_CHANGE)
-            val sensorTE = persistenceLayer.getLastTherapyRecordUpToNow(TE.Type.SENSOR_CHANGE)
             if (cannulaTE != null) {
                 warnColors.setColorByAge(binding.v2PumpCannulaAge, cannulaTE,
                     preferences.get(IntKey.OverviewCageWarning), preferences.get(IntKey.OverviewCageCritical))
@@ -854,10 +903,55 @@ class BoostOverviewV2Fragment : DaggerFragment(), View.OnClickListener {
 
             // TalkBack
             val resDesc = if (res > 0) "${decimalFormatter.to0Decimal(res)} units" else "unknown"
-            val batDesc = if (bat != null) "$bat percent" else "unknown"
-            binding.v2PumpSection.contentDescription = "Pump: reservoir $resDesc, battery $batDesc, cannula $cStr, sensor $sStr"
+            val parts = mutableListOf("reservoir $resDesc")
+            if (battery.visible) parts += "pump battery ${battery.spoken}"
+            if (phoneBattery.visible) parts += "main phone battery ${phoneBattery.spoken}"
+            parts += "cannula $cStr"
+            parts += "sensor $sStr"
+            binding.v2PumpSection.contentDescription = "Pump: " + parts.joinToString(", ")
         }
     }
+
+    /**
+     * Pump battery for the pump column. The full app reads the local driver; AAPSClient's local pump
+     * is the virtual pump (constant 50 %), so it reads the main phone's Nightscout device status.
+     */
+    private fun pumpBatteryReading(pump: app.aaps.core.interfaces.pump.Pump, batteryChangeTs: Long?): BoostBatteryDisplay.Reading {
+        val now = dateUtil.now()
+        return if (config.AAPSCLIENT) {
+            val ns = processedDeviceStatusData.pumpData?.let {
+                BoostBatteryDisplay.NsPump(
+                    clock = it.clock,
+                    percent = if (it.isPercent) it.percent else null,
+                    voltage = if (!it.isPercent) it.voltage else null
+                )
+            }
+            BoostBatteryDisplay.pumpBattery(true, null, ns, batteryChangeTs, now, nsStaleAfterMs())
+        } else {
+            val model = pump.model()
+            val erosLink = model == PumpType.OMNIPOD_EROS && pump.isUseRileyLinkBatteryLevel()
+            val local = BoostBatteryDisplay.LocalPump(
+                level = pump.batteryLevel,
+                supportsLevel = model.supportBatteryLevel || erosLink,
+                batteryAgeApplies = pump.pumpDescription.isBatteryReplaceable || pump.isBatteryChangeLoggingEnabled(),
+                patchWithoutLink = pump.pumpDescription.isPatchPump && !pump.pumpDescription.useHardwareLink
+            )
+            BoostBatteryDisplay.pumpBattery(false, local, null, batteryChangeTs, now, nsStaleAfterMs())
+        }
+    }
+
+    private fun uploaderBatteryReading(): BoostBatteryDisplay.Reading {
+        if (!config.AAPSCLIENT) return BoostBatteryDisplay.uploaderBattery(false, emptyList(), 0L, 0L)
+        // uploaderMap is a plain HashMap written by the Nightscout handler on another thread.
+        val uploaders = runCatching {
+            processedDeviceStatusData.uploaderMap.values.toList().map { BoostBatteryDisplay.NsUploader(it.clock, it.battery, it.isCharging) }
+        }.getOrDefault(emptyList())
+        return BoostBatteryDisplay.uploaderBattery(true, uploaders, dateUtil.now(), nsStaleAfterMs())
+    }
+
+    /** The Nightscout "urgentClock" pump setting (default 60 min), which the stock client status uses for the same purpose. */
+    private fun nsStaleAfterMs(): Long =
+        (nsSettingsStatus.extendedPumpSettings("urgentClock").takeIf { it > 0 } ?: 60.0).let { (it * 60_000L).toLong() }
 
     // --- Hero right column (Target, Exercise) ---
 
@@ -1139,6 +1233,16 @@ class BoostOverviewV2Fragment : DaggerFragment(), View.OnClickListener {
             binding.v2ButtonsLayout.quickWizardButton.visibility == View.VISIBLE ||
             hasUserActions
         binding.v2ButtonsLayout.root.visibility = anyVisible.toVisibility()
+        arrangeActionButtons()
+    }
+
+    /** Re-flows the V2 action cards into rows of at most three, from whichever are visible now. */
+    private fun arrangeActionButtons() {
+        ButtonGrid.arrange(
+            binding.v2ActionButtons,
+            listOf(binding.v2BtnInsulin, binding.v2BtnCalculator, binding.v2BtnCarbs, binding.v2BtnTreatment, binding.v2BtnCalibration, binding.v2BtnCgm),
+            gapPx = rh.dpToPx(8), rowGapPx = rh.dpToPx(8)
+        )
     }
 
     /**
@@ -1189,6 +1293,7 @@ class BoostOverviewV2Fragment : DaggerFragment(), View.OnClickListener {
                     list += event.hashCode()
                 }
         container.visibility = events.isNotEmpty().toVisibility()
+        ButtonGrid.arrange(container, (0 until container.childCount).map { container.getChildAt(it) }, rh.dpToPx(2), rh.dpToPx(2))
         if (list != lastUserAction) {
             lastUserAction = list
             rxBus.send(EventWearUpdateTiles())

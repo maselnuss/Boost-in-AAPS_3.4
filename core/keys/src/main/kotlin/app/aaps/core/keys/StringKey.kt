@@ -146,6 +146,12 @@ enum class StringKey(
     // aggression 1.0/0.92 across the 4% TBR line by window).
     ApsBoostV5AutoConfigPending("boost_v5_autoconfig_pending", "", defaultedBySM = true),
 
+    // JSON map {prefKey: value} of the value auto-config last wrote to a knob it sets as an absolute
+    // value rather than by movement (the confirm-tranche threshold). A stored value that matches it
+    // is auto-config's own; one that differs from it and from the factory default was set by hand
+    // and is kept. Never read for dosing.
+    ApsBoostV5AutoConfigWritten("boost_v5_autoconfig_written", "", defaultedBySM = true),
+
     // Breadcrumb for the LAST periodic re-derivation, replayed into the reason every cycle (as
     // autordv=) so Nightscout and boost_decisions always carry the current state, not just the one
     // cycle in seven where it ran. Display-only; never consulted for dosing.

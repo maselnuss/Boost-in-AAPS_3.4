@@ -27,9 +27,13 @@ import kotlin.math.min
  * backtesting/scripts/2026-08-meal-size-readability/out/tranche_rule.json.
  *
  * Only the threshold is personal. Best values run 0.30 to 0.65 with a median of 0.48 and correlate
- * only -0.32 with a participant's own share of large excursions, so it cannot be inferred and is a
- * per-user knob for auto-config to derive. Raising it withholds more, which is a tightening, so the
- * existing raise-guard semantics already point the right way without modification.
+ * only -0.32 with a participant's own share of large excursions, so it cannot be inferred from
+ * anything cheap. Auto-config derives it from the person's own confirm episodes
+ * ([TrancheThresholdDeriver]) and writes it to DoubleKey.ApsBoostV5TrancheThreshold under the rules
+ * in [BoostV5AutoConfigApply.resolveTrancheThreshold]: a raise withholds more and applies on its
+ * own; a lowering would release more and is not written while
+ * [BoostV5AutoConfigApply.TRANCHE_ALLOW_LOWERING] is false.
+ * Whether the tranche runs at all, and the fraction given immediately, remain the user's settings.
  *
  * This can only deliver less than the engine would without it, never more. Over an episode the
  * immediate part plus any release is at most the confirm shot the engine sized, and a withheld
@@ -43,7 +47,8 @@ import kotlin.math.min
  */
 class ConfirmTrancheController(
     // Settable rather than constructed, so changing the preference takes effect on the next cycle
-    // instead of at the next restart. Auto-config owns the threshold in the shipping form.
+    // instead of at the next restart. The fraction is a user setting; the threshold is written by
+    // auto-config unless the user has set it by hand.
     var immediateFraction: Double = 0.5,
     var releaseThreshold: Double = 0.48,
     private val holdMinutes: Double = 10.0,
@@ -51,15 +56,26 @@ class ConfirmTrancheController(
 ) {
 
     // Fitted 2026-08-27, eleven participants, held out by participant. See the class KDoc.
-    private companion object {
-        const val B0 = 2.48631
-        const val BG_CONFIRM = -0.014480
-        const val RISE_SINCE = -0.003822
-        const val MAX_RISE_SINCE = 0.138821
-        const val SLOPE_NOW = 0.072499
-        const val BG_NOW = -0.018302
-        const val HOLD_SLACK_MIN = 2.5
-        fun sigmoid(z: Double) = 1.0 / (1.0 + exp(-z))
+    internal companion object {
+        private const val B0 = 2.48631
+        private const val BG_CONFIRM = -0.014480
+        private const val RISE_SINCE = -0.003822
+        private const val MAX_RISE_SINCE = 0.138821
+        private const val SLOPE_NOW = 0.072499
+        private const val BG_NOW = -0.018302
+        private const val HOLD_SLACK_MIN = 2.5
+        private fun sigmoid(z: Double) = 1.0 / (1.0 + exp(-z))
+
+        /**
+         * The release rule's probability. One definition shared by the controller and by
+         * [TrancheThresholdDeriver], so the threshold auto-config derives is scored on the same
+         * quantity the controller compares it with.
+         */
+        fun releaseProbability(bgConfirm: Double, riseSince: Double, maxRiseSince: Double, slopeNow: Double, bgNow: Double): Double =
+            sigmoid(
+                B0 + BG_CONFIRM * bgConfirm + RISE_SINCE * riseSince +
+                    MAX_RISE_SINCE * maxRiseSince + SLOPE_NOW * slopeNow + BG_NOW * bgNow
+            )
     }
 
     data class Pending(
@@ -115,13 +131,7 @@ class ConfirmTrancheController(
             return 0.0
         }
         val slope = if (prev != null) bg - prev else 0.0
-        val z = B0 +
-            BG_CONFIRM * p.bgAtConfirm +
-            RISE_SINCE * (bg - p.bgAtConfirm) +
-            MAX_RISE_SINCE * (p.maxBgSince - p.bgAtConfirm) +
-            SLOPE_NOW * slope +
-            BG_NOW * bg
-        val prob = sigmoid(z)
+        val prob = releaseProbability(p.bgAtConfirm, bg - p.bgAtConfirm, p.maxBgSince - p.bgAtConfirm, slope, bg)
         pending = null
         return if (prob > releaseThreshold) p.heldU else 0.0
     }
@@ -131,11 +141,7 @@ class ConfirmTrancheController(
         val p = pending ?: return null
         if (bg == null || !bg.isFinite()) return null
         val slope = lastBg?.let { bg - it } ?: 0.0
-        return sigmoid(
-            B0 + BG_CONFIRM * p.bgAtConfirm + RISE_SINCE * (bg - p.bgAtConfirm) +
-                MAX_RISE_SINCE * (max(p.maxBgSince, bg) - p.bgAtConfirm) +
-                SLOPE_NOW * slope + BG_NOW * bg
-        )
+        return releaseProbability(p.bgAtConfirm, bg - p.bgAtConfirm, max(p.maxBgSince, bg) - p.bgAtConfirm, slope, bg)
     }
 
     /**

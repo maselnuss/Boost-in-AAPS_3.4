@@ -13,6 +13,8 @@ import app.aaps.core.data.aps.SMBDefaults
 import app.aaps.core.data.configuration.Constants
 import app.aaps.core.data.model.BS
 import app.aaps.core.data.model.GlucoseUnit
+import app.aaps.core.data.model.HR
+import app.aaps.core.data.model.TE
 import app.aaps.core.data.model.TT
 import app.aaps.core.data.plugin.PluginType
 import app.aaps.core.data.time.T
@@ -96,6 +98,7 @@ import kotlin.math.floor
 import kotlin.math.ln
 import kotlin.math.max
 import kotlin.math.min
+import app.aaps.plugins.aps.openAPSBoostV5.AutoConfigLedger
 import app.aaps.plugins.aps.openAPSBoostV5.MealHypothesis
 
 /**
@@ -186,6 +189,11 @@ open class OpenAPSBoostPlugin @Inject constructor(
     aapsLogger, rh
 ), APS, PluginConstraints {
 
+
+    // Site and reservoir age telemetry (2026-10-23): siteAge= and resAge= on every cycle, read-only.
+    private val deviceAgeTag = DeviceAgeTag { site ->
+        persistenceLayer.getLastTherapyRecordUpToNow(if (site) TE.Type.CANNULA_CHANGE else TE.Type.INSULIN_CHANGE)?.timestamp
+    }
 
     /** The volume-weighted dose shadow, held on preferences as the other shadows are. It logs
      *  an alternative blend and reaches nothing on the dose path. */
@@ -1083,7 +1091,11 @@ open class OpenAPSBoostPlugin @Inject constructor(
         // whenever auto-by-sleep was on, leaving a dawn false-AWAKE unprotected). sleepStateCached is
         // last cycle's state (this cycle's is evaluated later); one-cycle (~5 min) lag is acceptable
         // for a lie-in backstop.
-        val sleepInActive = StepFeed.sleepInActive(stepsAvailable, now, nightEndMs, sleepInMillis, recentSteps60Min, sleepInSteps)
+        // Anchored to the same morning end as the detector's lie-in: the configured end, or the learned
+        // wake when later (up to the band). Anchoring to the configured end ended this check while the
+        // detector's own lie-in ran on, so the two disagreed for up to 90 min (2026-10-15).
+        val lieInEndOfNightMs = sleepEvalCached?.inputs?.nightEndMin?.let { m -> midnight + m * 60_000L } ?: nightEndMs
+        val sleepInActive = StepFeed.sleepInActive(stepsAvailable, now, lieInEndOfNightMs, sleepInMillis, recentSteps60Min, sleepInSteps)
         val autoBySleepActive = preferences.get(BooleanKey.ApsBoostNightModeAutoBySleep)
         val nightModeEnabled = preferences.getBoostDosing(BooleanKey.ApsBoostNightModeEnabled)
         // Sleep as the INACTIVE branch must see it. SLEEPING is confirmed sleep; PRE_SLEEP is the
@@ -1101,7 +1113,9 @@ open class OpenAPSBoostPlugin @Inject constructor(
             debug.append("\nInactivity SUPPRESSED by sleep (60m steps $recentSteps60Min < $inactivitySteps; " +
                 "nightWindow=$inNightWindow sleepIn=$sleepInActive detector=${sleepStateCached.state}) → profile held at 100%")
         }
-        if (boostActive && StepFeed.lieInFailsafeEngages(sleepInActive, nightModeEnabled, autoBySleepActive, detectorSleeping)) {
+        // A genuine wake (steps or HR + steps) since the start of this morning's wake grace window.
+        val genuineWakeThisMorning = lastGenuineWakeMs >= lieInEndOfNightMs - SleepStateDetector.SLEEP_SCHEDULE_TOLERANCE_MIN * 60_000L
+        if (boostActive && StepFeed.lieInFailsafeEngages(sleepInActive, nightModeEnabled, autoBySleepActive, detectorSleeping, genuineWakeThisMorning)) {
             boostActive = false
             disableReason = "Sleep-in failsafe (60m steps $recentSteps60Min < threshold $sleepInSteps, within ${sleepInHours}h of night end; auto-by-sleep=$autoBySleepActive detector=${sleepStateCached.state})"
             aapsLogger.debug(LTag.APS, "Boost disabled due to lie-in (failsafe; auto-by-sleep=$autoBySleepActive detector=${sleepStateCached.state})")
@@ -1317,6 +1331,10 @@ open class OpenAPSBoostPlugin @Inject constructor(
         val allowAllBgSources = true // Boost: always allow all BG sources (forced on; user toggle removed)
         val advancedFiltering = allowAllBgSources || constraintsChecker.isAdvancedFilteringEnabled().also { inputConstraints.copyReasons(it) }.value()
         val now = dateUtil.now()
+        // Sleep state for THIS cycle, before the SMB constraint and the Boost gate read it. It used
+        // to run at the end of the cycle, so the gate always saw the previous cycle's state and a
+        // wake reached dosing five minutes late (2026-10-15: AWAKE at 09:03, Boost on at 09:08).
+        sleepEvalCached = evaluateSleep(now)
 
         val tb = processedTbrEbData.getTempBasalIncludingConvertedExtended(now)
         val currentTemp = CurrentTemp(
@@ -1998,6 +2016,9 @@ open class OpenAPSBoostPlugin @Inject constructor(
                 it.reason.append("accelMeal=$trig,${Round.roundTo(accel, 0.1)},${Round.roundTo(glucoseStatus.shortAvgDelta, 0.1)}," +
                     "${Round.roundTo(glucoseStatus.longAvgDelta, 0.1)},${glucoseStatus.glucose.toInt()},${v5decision?.mealHypothesis ?: "?"}; ")
             }.onFailure { t -> aapsLogger.error(LTag.APS, "Accel-meal shadow failed (swallowed — dosing untouched)", t) }
+            // Site and reservoir age (2026-10-23). READ-ONLY telemetry; failure swallowed.
+            runCatching { it.reason.append(deviceAgeTag.tag(now)) }
+                .onFailure { t -> aapsLogger.error(LTag.APS, "Device-age tag failed (swallowed, dosing untouched)", t) }
             // Sleep gate (2026-06-14): do NOT let V5 drive the SMB while SLEEPING — fall back to V1's
             // (oref1/Boost) SMB, which already respects night mode. V5 still computes its shadow
             // telemetry above (runShadow ran), so the V5-vs-V1 comparison continues overnight; only
@@ -2242,115 +2263,16 @@ open class OpenAPSBoostPlugin @Inject constructor(
             }
             lastStepsFeed = activityResult.stepsFeed
 
-            // 2026-06-02: Sleep state evaluation. Runs at end of invoke so we have
-            // mlMealLikely from this cycle. State persists across plugin restarts via
-            // StringKey.ApsBoostSleepState. Updates sleepStateCached so the next
-            // isNightModeActive() call sees the fresh state.
+            // Sleep telemetry for NS. The state itself was evaluated at the start of the cycle by
+            // [evaluateSleep]; this cycle's mlMealLikely is kept for the next evaluation, where it
+            // gates sleep entry only.
+            lastMlMealLikely = it.mlMealLikely
             try {
-                val configuredNightStartMin = parseTimeToMinutesOfDay(preferences.getBoostDosing(StringKey.ApsBoostNightModeStart))
-                val configuredNightEndMin = parseTimeToMinutesOfDay(preferences.getBoostDosing(StringKey.ApsBoostNightModeEnd))
-                val nowLocal = java.time.LocalTime.now()
-                val minOfDay = nowLocal.hour * 60 + nowLocal.minute
-
-                // Auto-tune from learned 28-day history if ≥7 sessions exist; otherwise fall back
-                // to configured nightStart / nightEnd.
-                val localOffsetMs = java.time.ZoneId.systemDefault().rules.getOffset(java.time.Instant.now()).totalSeconds * 1000L
-                val agg = SleepHistoryTracker.aggregate(sleepHistoryCached, localOffsetMs)
-                // The learned window may only nudge the configured night window by ±BAND, and the
-                // wake side trains on genuine wakes only (see SleepHistoryTracker). Together these
-                // anchor the hard sleep/wake bounds to the user's configured times and cap how far
-                // learning can move them — preventing the self-reinforcing earlier-every-night
-                // collapse seen when the hard-exit fed its own learned wake. No/insufficient data
-                // → effective == configured.
-                val effectiveNightStartMin = clampToConfiguredBand(agg.sleepStartMinAvg, configuredNightStartMin, LEARNED_WINDOW_BAND_MIN)
-                // wake side: one-sided — learning may only push the night-end LATER than configured, never
-                // earlier (never lift protection before the user's set wake). See clampToConfiguredBand.
-                val effectiveNightEndMin = clampToConfiguredBand(agg.wakeMinAvg, configuredNightEndMin, LEARNED_WINDOW_BAND_MIN, allowEarlier = false)
-                // Learned resting HR (sleep p10 median, ≥7 sessions) overrides the configured static value
-                // for sleep state evaluation; fallback is the existing user-set hrRestingBpm.
-                val effectiveHrResting = agg.restingHrBpm ?: hrRestingBpm
-
-                // 30-min window for HR — sufficient for both 5-min and 15-min avgs and sleep eval.
-                val hrReadingsForSleep = persistenceLayer.getHeartRatesFromTime(now - 30 * 60_000L)
-                // Lump-tolerant wake evidence (2026-07-03): the detector needs today's CUMULATIVE
-                // steps (max of wear-reconstructed and phone) — wear-bridge steps arrive in batches
-                // the phone's 15-min bucket never sees (the phone sits on the nightstand overnight),
-                // which is why the 06:00 wake was missed and every wake was boundary-forced.
-                val sleepTodayIdx = DailyStepHistoryTracker.dayIndex(now, localOffsetMs)
-                val sleepDayStartMs = sleepTodayIdx * 86_400_000L - localOffsetMs
-                val scTodayForSleep = try { persistenceLayer.getStepsCountFromTimeToTime(sleepDayStartMs, now) } catch (t: Throwable) { emptyList() }
-                val stepsTodayForSleep = maxOf(
-                    WearStepSource.stepsToday(scTodayForSleep, sleepDayStartMs, now),
-                    StepService.getStepsToday(localOffsetMs)
-                )
-                val sleepResult = SleepStateDetector.evaluate(
-                    prev = sleepStateCached,
-                    inputs = SleepStateDetector.Inputs(
-                        nowMs = now,
-                        minuteOfDay = minOfDay,
-                        hrReadings = hrReadingsForSleep,
-                        hrWindowMinutes = 5,
-                        hrResting = effectiveHrResting,
-                        stepsLast15Min = recentSteps15Min,
-                        mlMealLikely = it.mlMealLikely,
-                        nightStartMin = effectiveNightStartMin,
-                        nightEndMin = effectiveNightEndMin,
-                        preSleepLeadMin = preferences.getBoostDosing(IntKey.ApsBoostPreSleepLeadMin),
-                        minSleepHysteresisMin = preferences.getBoostDosing(IntKey.ApsBoostSleepHysteresisMin),
-                        wakeHrHysteresisMin = preferences.getBoostDosing(IntKey.ApsBoostWakeHrHysteresisMin),
-                        stepsToday = stepsTodayForSleep,
-                        // 2026-07-08 sleep-in merge (v7-shadow): fold the lie-in backstop into the state machine.
-                        sleepInStepsThreshold = sleepInSteps,
-                        sleepInWindowMin = (sleepInHours * 60.0).toInt(),
-                        cycleSpacingMinutes = iobCobCalculator.ads.detectedCadenceMinutes
-                    ),
-                    aapsLogger = aapsLogger
-                )
-                val prevSleepState = sleepStateCached.state
-                sleepStateCached = sleepResult.newState
-                if (sleepResult.wakeReason == "boundary") lastSleepBoundaryExitMs = now
-                if (sleepResult.transitioned) {
-                    preferences.put(StringKey.ApsBoostSleepState, sleepResult.newState.serialize())
-                    aapsLogger.debug(LTag.APS, "Sleep state transitioned → ${sleepResult.newState.state} (${sleepResult.debug})")
-
-                    // Update sleep history on the actual sleep/wake transitions only
-                    val newState = sleepResult.newState.state
-                    val historyChanged = when {
-                        prevSleepState != SleepStateDetector.SleepState.SLEEPING &&
-                            newState == SleepStateDetector.SleepState.SLEEPING -> {
-                            sleepHistoryCached = SleepHistoryTracker.onSleepStart(sleepHistoryCached, now)
-                            true
-                        }
-                        prevSleepState == SleepStateDetector.SleepState.SLEEPING &&
-                            newState != SleepStateDetector.SleepState.SLEEPING -> {
-                            // Fetch HR over the just-ended sleep period for restingHrP10
-                            val sleepStartMs = sleepHistoryCached.openSleepStartMs ?: 0L
-                            val sleepHrSamples = if (sleepStartMs > 0) {
-                                persistenceLayer.getHeartRatesFromTimeToTime(sleepStartMs, now)
-                                    .filter { hr -> hr.isValid && hr.beatsPerMinute > 0 }
-                                    .map { hr -> hr.beatsPerMinute }
-                            } else emptyList()
-                            // Fetch HR over the awake period preceding this sleep for daytimeHrP10
-                            val priorWakeMs = SleepHistoryTracker.lastWakeMs(sleepHistoryCached)
-                            val daytimeHrSamples = if (priorWakeMs != null && sleepStartMs > priorWakeMs) {
-                                persistenceLayer.getHeartRatesFromTimeToTime(priorWakeMs, sleepStartMs)
-                                    .filter { hr -> hr.isValid && hr.beatsPerMinute > 0 }
-                                    .map { hr -> hr.beatsPerMinute }
-                            } else emptyList()
-                            sleepHistoryCached = SleepHistoryTracker.onWake(
-                                sleepHistoryCached, now,
-                                sleepHrBpms = sleepHrSamples,
-                                daytimeHrBpms = daytimeHrSamples,
-                                wakeReason = sleepResult.wakeReason
-                            )
-                            true
-                        }
-                        else -> false
-                    }
-                    if (historyChanged) {
-                        preferences.put(StringKey.ApsBoostSleepHistory, sleepHistoryCached.serialize())
-                    }
-                }
+                val ev = sleepEvalCached ?: throw IllegalStateException("sleep evaluation did not run this cycle")
+                val sleepResult = ev.result
+                val agg = ev.agg
+                val sleepInputs = ev.inputs
+                val hrReadingsForSleep = ev.hrReadings
 
                 // ── NS upload: HR + sleep + learned-schedule telemetry ─────────
                 it.sleepState = sleepResult.newState.state.name
@@ -2412,26 +2334,23 @@ open class OpenAPSBoostPlugin @Inject constructor(
                 // boost_decisions.reason_text. Written by the V5 onboarding path (see
                 // StringKey.ApsBoostV5AutoConfigSummary); read-only here. Empty = the onboarding path has
                 // not reached a decision yet on this install. Display-only, never consulted for dosing.
-                preferences.get(StringKey.ApsBoostV5AutoConfigSummary).let { acs ->
-                    if (acs.isNotEmpty()) it.reason.append("autocfg=$acs; ")
-                }
-                // 2026-08-03 periodic re-derivation breadcrumb, same contract: replayed EVERY cycle
-                // so Nightscout and boost_decisions always show the CURRENT auto-config state, not
+                // 2026-08-03 periodic re-derivation breadcrumb (autordv=), same contract: replayed EVERY
+                // cycle so Nightscout and boost_decisions always show the CURRENT auto-config state, not
                 // just the one cycle in seven when the re-derivation actually ran. Written by
-                // OpenAPSBoostV5Plugin.maybeRedrive; display-only, never consulted for dosing.
-                preferences.get(StringKey.ApsBoostV5RedriveSummary).let { rds ->
-                    if (rds.isNotEmpty()) it.reason.append("autordv=$rds; ")
-                }
-                // 2026-07-30 install-time history-gap breadcrumb, same contract (see BoostHistorySync).
-                // Empty = adequate local history, so nothing to say — the common case writes nothing.
-                preferences.get(StringKey.ApsBoostHistorySyncSummary).let { hss ->
-                    if (hss.isNotEmpty()) it.reason.append("histsync=$hss; ")
-                }
+                // OpenAPSBoostV5Plugin.maybeRedrive. 2026-07-30 install-time history-gap breadcrumb
+                // (histsync=), same contract (see BoostHistorySync); empty in the common case.
+                // Read unmasked: the keys are defaultedBySM, so a plain get() dropped all three in
+                // Simple Mode.
+                it.reason.append(AutoConfigLedger.reasonBreadcrumbs(preferences))
                 it.reason.append("sleep=${sleepResult.newState.state}")
                 if (agg.sleepStartMinAvg != null) {
                     it.reason.append(" learned=${formatClockMin(agg.sleepStartMinAvg!!)}→${formatClockMin(agg.wakeMinAvg ?: 0)}/${agg.sessionCount}d")
                 }
                 it.reason.append("; ")
+                // 2026-10-15: the detector's working each cycle, so a late or missed wake can be read
+                // from NS: step growth over the last hour on the watch and phone series, the 15-min
+                // steps it saw, the HR-above-floor streak, minutes into a wake candidacy, lie-in.
+                it.reason.append(sleepDbgTag(sleepResult, sleepInputs))
             } catch (t: Throwable) {
                 aapsLogger.error(LTag.APS, "Sleep state evaluation failed", t)
             }
@@ -2670,6 +2589,158 @@ open class OpenAPSBoostPlugin @Inject constructor(
         SleepStateDetector.State.deserialize(preferences.getBoostDosing(StringKey.ApsBoostSleepState))
     @Volatile private var sleepHistoryCached: SleepHistoryTracker.History =
         SleepHistoryTracker.History.deserialize(preferences.getBoostDosing(StringKey.ApsBoostSleepHistory))
+    /** One cycle's sleep evaluation, kept for the end-of-cycle telemetry. (2026-10-15) */
+    private class SleepEval(
+        val result: SleepStateDetector.Result,
+        val agg: SleepHistoryTracker.Aggregate,
+        val inputs: SleepStateDetector.Inputs,
+        val hrReadings: List<HR>
+    )
+
+    @Volatile private var sleepEvalCached: SleepEval? = null
+    // When the detector last confirmed a wake on steps or HR + steps. In memory only: after a restart
+    // the lie-in failsafe applies again until steps clear it, the conservative direction.
+    @Volatile private var lastGenuineWakeMs: Long = 0L
+    private val GENUINE_STEP_WAKES = setOf("steps", "hr_steps")
+    // mlMealLikely from the previous cycle: the sleep evaluation now runs before this cycle's is
+    // computed. It gates sleep ENTRY only (< 0.30), so a five-minute-old value is enough.
+    @Volatile private var lastMlMealLikely: Double? = null
+
+    /**
+     * Evaluate the sleep state for this cycle and update [sleepStateCached] and the sleep history.
+     * Runs at the start of [runEngine] so the SMB constraint and the Boost gate act on this cycle's
+     * state. Null if the evaluation failed; the previous state then stands.
+     */
+    private fun evaluateSleep(now: Long): SleepEval? =
+        try {
+            val configuredNightStartMin = parseTimeToMinutesOfDay(preferences.getBoostDosing(StringKey.ApsBoostNightModeStart))
+            val configuredNightEndMin = parseTimeToMinutesOfDay(preferences.getBoostDosing(StringKey.ApsBoostNightModeEnd))
+            val nowLocal = java.time.LocalTime.now()
+            val minOfDay = nowLocal.hour * 60 + nowLocal.minute
+
+            // Auto-tune from learned 28-day history if ≥7 sessions exist; otherwise fall back
+            // to configured nightStart / nightEnd.
+            val localOffsetMs = java.time.ZoneId.systemDefault().rules.getOffset(java.time.Instant.now()).totalSeconds * 1000L
+            val agg = SleepHistoryTracker.aggregate(sleepHistoryCached, localOffsetMs)
+            // The learned window may only nudge the configured night window by ±BAND, and the
+            // wake side trains on genuine wakes only (see SleepHistoryTracker). Together these
+            // anchor the hard sleep/wake bounds to the user's configured times and cap how far
+            // learning can move them — preventing the self-reinforcing earlier-every-night
+            // collapse seen when the hard-exit fed its own learned wake. No/insufficient data
+            // → effective == configured.
+            val effectiveNightStartMin = clampToConfiguredBand(agg.sleepStartMinAvg, configuredNightStartMin, LEARNED_WINDOW_BAND_MIN)
+            // wake side: one-sided — learning may only push the night-end LATER than configured, never
+            // earlier (never lift protection before the user's set wake). See clampToConfiguredBand.
+            val effectiveNightEndMin = clampToConfiguredBand(agg.wakeMinAvg, configuredNightEndMin, LEARNED_WINDOW_BAND_MIN, allowEarlier = false)
+            // Learned resting HR (sleep p10 median, ≥7 sessions) overrides the configured static value
+            // for sleep state evaluation; fallback is the existing user-set hrRestingBpm.
+            val effectiveHrResting = agg.restingHrBpm ?: hrRestingBpm
+
+            // 30-min window for HR — sufficient for both 5-min and 15-min avgs and sleep eval.
+            val hrReadingsForSleep = persistenceLayer.getHeartRatesFromTime(now - 30 * 60_000L)
+            // Lump-tolerant wake evidence (2026-07-03): the detector needs today's CUMULATIVE
+            // steps — wear-bridge steps arrive in batches the phone's 15-min bucket never sees (the
+            // phone sits on the nightstand overnight), which is why the 06:00 wake was missed and
+            // every wake was boundary-forced.
+            val sleepTodayIdx = DailyStepHistoryTracker.dayIndex(now, localOffsetMs)
+            val sleepDayStartMs = sleepTodayIdx * 86_400_000L - localOffsetMs
+            val scTodayForSleep = try { persistenceLayer.getStepsCountFromTimeToTime(sleepDayStartMs, now) } catch (t: Throwable) { emptyList() }
+            // Watch and phone day totals kept apart; the detector measures growth on each (2026-10-15).
+            val watchStepsToday = WearStepSource.stepsToday(scTodayForSleep, sleepDayStartMs, now)
+            val phoneStepsToday = StepService.getStepsToday(localOffsetMs)
+            val sleepInputs = SleepStateDetector.Inputs(
+                nowMs = now,
+                minuteOfDay = minOfDay,
+                hrReadings = hrReadingsForSleep,
+                hrWindowMinutes = 5,
+                hrResting = effectiveHrResting,
+                // Phone and freshest watch row combined, as the gate sees them. Phone-only missed every
+                // watch step with the phone on the nightstand (2026-10-15).
+                stepsLast15Min = blendedSteps15Min(now),
+                mlMealLikely = lastMlMealLikely,
+                nightStartMin = effectiveNightStartMin,
+                nightEndMin = effectiveNightEndMin,
+                preSleepLeadMin = preferences.getBoostDosing(IntKey.ApsBoostPreSleepLeadMin),
+                minSleepHysteresisMin = preferences.getBoostDosing(IntKey.ApsBoostSleepHysteresisMin),
+                wakeHrHysteresisMin = preferences.getBoostDosing(IntKey.ApsBoostWakeHrHysteresisMin),
+                stepsToday = watchStepsToday,
+                // 2026-07-08 sleep-in merge (v7-shadow): fold the lie-in backstop into the state machine.
+                sleepInStepsThreshold = sleepInSteps,
+                sleepInWindowMin = (sleepInHours * 60.0).toInt(),
+                cycleSpacingMinutes = iobCobCalculator.ads.detectedCadenceMinutes,
+                stepsTodayPhone = phoneStepsToday
+            )
+            val sleepResult = SleepStateDetector.evaluate(
+                prev = sleepStateCached,
+                inputs = sleepInputs,
+                aapsLogger = aapsLogger
+            )
+            val prevSleepState = sleepStateCached.state
+            sleepStateCached = sleepResult.newState
+            if (sleepResult.wakeReason == "boundary") lastSleepBoundaryExitMs = now
+            if (sleepResult.wakeReason in GENUINE_STEP_WAKES) lastGenuineWakeMs = now
+            if (sleepResult.transitioned) {
+                preferences.put(StringKey.ApsBoostSleepState, sleepResult.newState.serialize())
+                aapsLogger.debug(LTag.APS, "Sleep state transitioned → ${sleepResult.newState.state} (${sleepResult.debug})")
+
+                // Update sleep history on the actual sleep/wake transitions only
+                val newState = sleepResult.newState.state
+                val historyChanged = when {
+                    prevSleepState != SleepStateDetector.SleepState.SLEEPING &&
+                        newState == SleepStateDetector.SleepState.SLEEPING -> {
+                        sleepHistoryCached = SleepHistoryTracker.onSleepStart(sleepHistoryCached, now)
+                        true
+                    }
+                    prevSleepState == SleepStateDetector.SleepState.SLEEPING &&
+                        newState != SleepStateDetector.SleepState.SLEEPING -> {
+                        // Fetch HR over the just-ended sleep period for restingHrP10
+                        val sleepStartMs = sleepHistoryCached.openSleepStartMs ?: 0L
+                        val sleepHrSamples = if (sleepStartMs > 0) {
+                            persistenceLayer.getHeartRatesFromTimeToTime(sleepStartMs, now)
+                                .filter { hr -> hr.isValid && hr.beatsPerMinute > 0 }
+                                .map { hr -> hr.beatsPerMinute }
+                        } else emptyList()
+                        // Fetch HR over the awake period preceding this sleep for daytimeHrP10
+                        val priorWakeMs = SleepHistoryTracker.lastWakeMs(sleepHistoryCached)
+                        val daytimeHrSamples = if (priorWakeMs != null && sleepStartMs > priorWakeMs) {
+                            persistenceLayer.getHeartRatesFromTimeToTime(priorWakeMs, sleepStartMs)
+                                .filter { hr -> hr.isValid && hr.beatsPerMinute > 0 }
+                                .map { hr -> hr.beatsPerMinute }
+                        } else emptyList()
+                        sleepHistoryCached = SleepHistoryTracker.onWake(
+                            sleepHistoryCached, now,
+                            sleepHrBpms = sleepHrSamples,
+                            daytimeHrBpms = daytimeHrSamples,
+                            wakeReason = sleepResult.wakeReason
+                        )
+                        true
+                    }
+                    else -> false
+                }
+                if (historyChanged) {
+                    preferences.put(StringKey.ApsBoostSleepHistory, sleepHistoryCached.serialize())
+                }
+            }
+            SleepEval(sleepResult, agg, sleepInputs, hrReadingsForSleep)
+        } catch (t: Throwable) {
+            aapsLogger.error(LTag.APS, "Sleep state evaluation failed", t)
+            null
+        }
+
+    /** Phone 15-min steps with the freshest watch row's 15-min count, the larger taken, as the gate. */
+    private fun blendedSteps15Min(now: Long): Int {
+        val phone = StepService.getRecentStepCount15Min()
+        val watch = try {
+            persistenceLayer.getStepsCountFromTimeToTime(now - 15 * 60_000L, now).maxByOrNull { sc -> sc.timestamp }?.steps15min ?: 0
+        } catch (t: Throwable) { 0 }
+        return maxOf(phone, watch)
+    }
+
+    /** `sleepDbg=lbWatch,lbPhone,steps15,hrStreak,wakeCandMin,lieIn; ` (wakeCandMin "-" when none). */
+    private fun sleepDbgTag(r: SleepStateDetector.Result, inputs: SleepStateDetector.Inputs): String {
+        val cand = r.newState.wakeCandidateSinceMs?.let { s -> ((inputs.nowMs - s) / 60_000L).toString() } ?: "-"
+        return "sleepDbg=${r.stepsLbWatch},${r.stepsLbPhone},${inputs.stepsLast15Min},${r.newState.hrHighStreak},$cand,${if (r.inLieIn) 1 else 0}; "
+    }
     // V6 meal-time learner — rolling 60-day history of V5-CONFIRMED meal commits. Loaded once at
     // construction; updated at end of invoke() when a fresh CONFIRMED fires, persisted on change.
     @Volatile private var mealTimeHistoryCached: MealTimeLearner.History =

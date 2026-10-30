@@ -20,6 +20,11 @@ enum class LongNonKey(
     // whether it changed anything. Drives the 7-day cadence.
     ApsBoostV5AutoConfigLastRedriveMs("boost_v5_autoconfig_last_redrive_ms", 0L),
 
+    // 2026-10-20 insulin-need watch (InsulinNeedWatch): when the person was last told their daily
+    // insulin had moved above or below their month, so the same direction waits 14 days to repeat.
+    ApsBoostNeedWatchLastAboveMs("boost_need_watch_last_above_ms", 0L),
+    ApsBoostNeedWatchLastBelowMs("boost_need_watch_last_below_ms", 0L),
+
     // Install-time history-gap backfill (2026-07-30, see BoostHistorySync) — when the last request
     // was made. Enforces BoostHistorySync.RETRY_COOLDOWN_MS so a thin-history install cannot ask
     // NSClient for a re-download on every 5-minute loop cycle.

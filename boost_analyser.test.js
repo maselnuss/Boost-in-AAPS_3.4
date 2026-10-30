@@ -278,4 +278,23 @@ t("analyse summarises primer activity without folding it into the dose compariso
   deq(C.pairDoses(cyc[0]), { v1: 0.1, v6: 0.3 });
 });
 
+/* ---------------- lever hints: caps read per cycle, not from the oldest cycle ---------------- */
+console.log("lever hints after a cap change");
+
+t("cap hints ignore clips at a cap the user has since raised", () => {
+  const ep = (cap, shot) => ({ peakBg: 230, commitShot: shot, commitCap: cap, cycles: [], confirmLatencyMin: 5 });
+  const cyc = (cap, ccap, fd, state) => ({ fcap: cap, ccap, fd, state, bg: 200, gates: "" });
+  const lev = (eps, cycles) => C.leverHints({ episodes: eps }, cycles).map(h => h.lever);
+  // confirmed cap raised 1.0 -> 2.0: two clips at the old cap, none at the new one
+  const before = [cyc(1.0, 0.5, 0.5, "COMMITTED")], after = [cyc(2.0, 1.0, 0.2, "COMMITTED")];
+  assert(!lev([ep(1.0, 1.0), ep(1.0, 1.0), ep(2.0, 1.2)], before.concat(after)).includes("Confirmed cap (U)"));
+  // the same two clips with the cap unchanged still raise the hint, and it quotes the current cap
+  const h = C.leverHints({ episodes: [ep(1.0, 1.0), ep(1.0, 1.0)] }, before);
+  assert(h.some(x => x.lever === "Confirmed cap (U)" && x.why.includes("now 1U")));
+  // committed cap raised 0.5 -> 1.0: four pinned cycles at 0.5 no longer count
+  const pinnedOld = Array.from({ length: 4 }, () => cyc(1.0, 0.5, 0.5, "COMMITTED"));
+  assert(!lev([], pinnedOld.concat(after)).includes("Committed cap (U)"));
+  assert(lev([], pinnedOld).includes("Committed cap (U)"));
+});
+
 console.log(`\nall ${n} tests passed`);

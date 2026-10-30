@@ -20,7 +20,10 @@ import app.aaps.core.data.ue.Sources
 import app.aaps.core.interfaces.aps.Loop
 import app.aaps.core.interfaces.aps.RT
 import app.aaps.core.interfaces.automation.Automation
+import app.aaps.core.data.pump.defs.PumpType
 import app.aaps.core.interfaces.configuration.Config
+import app.aaps.core.interfaces.nsclient.NSSettingsStatus
+import app.aaps.core.interfaces.nsclient.ProcessedDeviceStatusData
 import app.aaps.core.interfaces.db.PersistenceLayer
 import app.aaps.core.interfaces.iob.GlucoseStatusProvider
 import app.aaps.core.interfaces.iob.IobCobCalculator
@@ -134,6 +137,8 @@ class BoostOverviewFragment : DaggerFragment(), View.OnClickListener, View.OnLon
     @Inject lateinit var xDripSource: XDripSource
     @Inject lateinit var uel: UserEntryLogger
     @Inject lateinit var warnColors: WarnColors
+    @Inject lateinit var processedDeviceStatusData: ProcessedDeviceStatusData
+    @Inject lateinit var nsSettingsStatus: NSSettingsStatus
 
     // --- State ---
 
@@ -247,6 +252,7 @@ class BoostOverviewFragment : DaggerFragment(), View.OnClickListener, View.OnLon
         binding.buttonsLayout.carbsButton.setOnClickListener(this)
         binding.buttonsLayout.quickWizardButton.setOnClickListener(this)
         binding.buttonsLayout.quickWizardButton.setOnLongClickListener(this)
+        arrangeActionButtons()
     }
 
     override fun onResume() {
@@ -660,8 +666,22 @@ class BoostOverviewFragment : DaggerFragment(), View.OnClickListener, View.OnLon
                 binding.pumpReservoir.text = "---"
                 binding.pumpReservoir.setTextColor(rh.gac(context, app.aaps.core.ui.R.attr.defaultTextColor))
             }
-            val bat = pump.batteryLevel
-            binding.pumpBattery.text = if (bat != null) "\uD83D\uDD0B ${bat}%" else "\uD83D\uDD0B ---"
+            // Same source rules as the V2 overview (BoostBatteryDisplay): the pump's own level only when
+            // its type reports one, else the battery age; in AAPSClient the main phone's Nightscout
+            // device status, never the local virtual pump's fixed 50 %.
+            val batteryTE = persistenceLayer.getLastTherapyRecordUpToNow(TE.Type.PUMP_BATTERY_CHANGE)
+            val battery = pumpBatteryReading(pump, batteryTE?.timestamp)
+            binding.pumpBattery.visibility = battery.visible.toVisibility()
+            binding.pumpBattery.text = "\uD83D\uDD0B ${battery.text}"
+            when (battery.kind) {
+                BoostBatteryDisplay.Kind.PERCENT ->
+                    warnColors.setColorInverse(binding.pumpBattery, (battery.percent ?: 0).toDouble(),
+                        preferences.get(IntKey.OverviewBattWarning), preferences.get(IntKey.OverviewBattCritical))
+                BoostBatteryDisplay.Kind.AGE     ->
+                    if (batteryTE != null) warnColors.setColorByAge(binding.pumpBattery, batteryTE,
+                        preferences.get(IntKey.OverviewBageWarning), preferences.get(IntKey.OverviewBageCritical))
+                else                             -> binding.pumpBattery.setTextColor(rh.gac(context, app.aaps.core.ui.R.attr.defaultTextColor))
+            }
             val cStr = formatAgeDaysHours(boostStatus.cannulaAgeDays)
             val sStr = formatAgeDaysHours(boostStatus.sensorAgeDays)
             binding.pumpCannulaAge.text = "\uD83E\uDE79 $cStr"
@@ -688,10 +708,10 @@ class BoostOverviewFragment : DaggerFragment(), View.OnClickListener, View.OnLon
             } else if (res > 0) {
                 "${decimalFormatter.to0Decimal(res)} units"
             } else "unknown"
-            val batDesc = if (bat != null) "$bat percent" else "unknown"
+            val batDesc = if (battery.visible) ", battery ${battery.spoken}" else ""
             val cDesc = formatAgeDaysHours(boostStatus.cannulaAgeDays)
             val sDesc = formatAgeDaysHours(boostStatus.sensorAgeDays)
-            binding.pumpSection.contentDescription = "Pump: reservoir $resDesc, battery $batDesc, cannula $cDesc, sensor $sDesc"
+            binding.pumpSection.contentDescription = "Pump: reservoir $resDesc$batDesc, cannula $cDesc, sensor $sDesc"
         }
     }
 
@@ -1153,11 +1173,30 @@ class BoostOverviewFragment : DaggerFragment(), View.OnClickListener, View.OnLon
                     list += event.hashCode()
                 }
         binding.buttonsLayout.userButtonsLayout.visibility = events.isNotEmpty().toVisibility()
+        ButtonGrid.arrange(
+            binding.buttonsLayout.userButtonsLayout,
+            (0 until binding.buttonsLayout.userButtonsLayout.childCount).map { binding.buttonsLayout.userButtonsLayout.getChildAt(it) },
+            rh.dpToPx(2), rh.dpToPx(2)
+        )
+        arrangeActionButtons()
 
         if (list != lastUserAction) {
             lastUserAction = list
             rxBus.send(EventWearUpdateTiles())
         }
+    }
+
+    /**
+     * Re-flows the standard action buttons (shared overview_buttons_layout) into rows of at most three,
+     * from whichever are visible now. Only this fragment does so; the stock overview keeps its single row.
+     */
+    private fun arrangeActionButtons() {
+        val b = binding.buttonsLayout
+        ButtonGrid.arrange(
+            b.actionButtonsLayout,
+            listOf(b.treatmentButton, b.insulinButton, b.carbsButton, b.wizardButton, b.calibrationButton, b.cgmButton, b.quickWizardButton),
+            gapPx = rh.dpToPx(4), rowGapPx = rh.dpToPx(2)
+        )
     }
 
     // --- Click handlers ---
@@ -1398,4 +1437,32 @@ class BoostOverviewFragment : DaggerFragment(), View.OnClickListener, View.OnLon
         val hours = totalHours % 24
         return "${days}d ${hours}h"
     }
+
+    private fun pumpBatteryReading(pump: app.aaps.core.interfaces.pump.Pump, batteryChangeTs: Long?): BoostBatteryDisplay.Reading {
+        val now = dateUtil.now()
+        return if (config.AAPSCLIENT) {
+            val ns = processedDeviceStatusData.pumpData?.let {
+                BoostBatteryDisplay.NsPump(
+                    clock = it.clock,
+                    percent = if (it.isPercent) it.percent else null,
+                    voltage = if (!it.isPercent) it.voltage else null
+                )
+            }
+            BoostBatteryDisplay.pumpBattery(true, null, ns, batteryChangeTs, now, nsStaleAfterMs())
+        } else {
+            val model = pump.model()
+            val erosLink = model == PumpType.OMNIPOD_EROS && pump.isUseRileyLinkBatteryLevel()
+            val local = BoostBatteryDisplay.LocalPump(
+                level = pump.batteryLevel,
+                supportsLevel = model.supportBatteryLevel || erosLink,
+                batteryAgeApplies = pump.pumpDescription.isBatteryReplaceable || pump.isBatteryChangeLoggingEnabled(),
+                patchWithoutLink = pump.pumpDescription.isPatchPump && !pump.pumpDescription.useHardwareLink
+            )
+            BoostBatteryDisplay.pumpBattery(false, local, null, batteryChangeTs, now, nsStaleAfterMs())
+        }
+    }
+
+    /** The Nightscout "urgentClock" pump setting (default 60 min), which the stock client status uses for the same purpose. */
+    private fun nsStaleAfterMs(): Long =
+        (nsSettingsStatus.extendedPumpSettings("urgentClock").takeIf { it > 0 } ?: 60.0).let { (it * 60_000L).toLong() }
 }

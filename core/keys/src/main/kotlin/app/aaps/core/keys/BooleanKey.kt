@@ -116,8 +116,9 @@ enum class BooleanKey(
     // later if the rise continues. The confirm shot is the same size whether the excursion reaches
     // 20 mg/dL or 100, and the trace separates those two ends at 0.730 at the confirming cycle
     // against 0.893 ten minutes on. Can only deliver LESS than without it, never more.
-    // AUTO-CONFIG MANAGED in the shipping form: the release rule's coefficients are population
-    // derived and only the threshold is personal, so this is not a per-user preference.
+    // A user setting, default OFF, and not managed by auto-config. The release rule's coefficients
+    // are population derived; only its threshold (DoubleKey.ApsBoostV5TrancheThreshold) is personal,
+    // and auto-config derives that one from the person's own confirm episodes.
     ApsBoostV5ConfirmTranche("boost_v5_confirm_tranche", false, defaultedBySM = true),
     // 2026-07-17 aggressive early-confirm — shaves the sustained-score early-confirm path one more
     // cycle (age −2). The pre-push backtest showed ~28% of its candidates are fizzle-catches (new
@@ -151,10 +152,13 @@ enum class BooleanKey(
     // bounded; all Phase-3 hard gates + cumulative/boost-active/sleep seam guards still apply.
     // Default OFF. Field driver: user H "postprandial highs" — his budget=0 tail (55% of his >180).
     ApsBoostV5VelocityBudgetActive("boost_v5_velocity_budget_active", false, defaultedBySM = true),
-    // 2026-07-20 V1-acceleration primer — hypo-prone routing (AUTO-CONFIG MANAGED). When ON,
-    // auto-config has classified the user hypo-prone and routes the early primer through a
-    // RETRACTABLE temp-basal instead of a bolus (safe-by-unwinding rather than safe-by-size).
-    // OFF (default) = bolus primer (well-controlled). Overridable by ApsBoostV5PrimerBolusMode.
+    // 2026-07-20 V1-acceleration primer delivery route (AUTO-CONFIG MANAGED). When ON, the early
+    // primer goes through a RETRACTABLE temp basal instead of a bolus (safe by unwinding rather than
+    // by size). OFF (default) = bolus primer. Onboarding turns it ON when the 14-day window is not
+    // well controlled (TBR<70 under 1.5% and time<54 under 0.3%); each weekly re-derivation then moves it to the temp basal on the first
+    // window that is not well controlled, and back to the bolus only after two consecutive
+    // well-controlled windows (BoostV5AutoConfigApply.resolvePrimerRoute). A value auto-config did not
+    // write is left alone. Overridable by ApsBoostV5PrimerBolusMode.
     ApsBoostV5PrimerTbrFallback("boost_v5_primer_tbr_fallback", false, defaultedBySM = true),
     // 2026-07-20 V1-acceleration primer — USER OVERRIDE (NOT auto-config-managed). When ON, forces
     // the bolus primer even if auto-config routed this user to the temp-basal fallback

@@ -509,7 +509,8 @@ function analyse(cycles, entries, episodes) {
       ...e, cycles: win,
       v1: sum(pw.map(r => r.v1)), v6: sum(pw.map(r => r.v6)),
       confirmLatencyMin: conf ? Math.round((conf.ts - e.onsetT) / 60000) : null,
-      commitShot: conf ? conf.fd : null
+      commitShot: conf ? conf.fd : null,
+      commitCap: conf ? conf.fcap : null
     };
   });
   const days = cycles.length ? (cycles[cycles.length - 1].ts - cycles[0].ts) / 86400000 : 0;
@@ -685,21 +686,24 @@ function leverHints(model, cycles, activeMode, labels) {
   if (slow.length >= 2)
     hints.push({ lever: "Fast-carb confirm (Advanced)", dir: "enable / review",
       why: `${slow.length} sharp rises peaked ≥200 with CONFIRMED arriving ≥25 min after onset (median ${median(slow.map(e=>e.confirmLatencyMin))} min). The fast path confirms sharp+accelerating rises in one cycle.` });
-  // 2. confirmed cap binding
-  const fc = cycles.find(c => c.fcap !== null);
+  // 2. confirmed cap binding. Each shot is tested against the cap in force when it fired, and only
+  //    a cap at or above today's counts: a clip at a cap the user has since raised says nothing now.
+  const fc = cycles.filter(c => c.fcap !== null).pop();
   if (fc) {
-    const clipped = eps.filter(e => e.commitShot !== null && e.commitShot >= 0.95 * fc.fcap && e.peakBg >= 200);
+    const clipped = eps.filter(e => e.commitShot !== null && e.commitCap !== null && e.commitCap >= fc.fcap &&
+      e.commitShot >= 0.95 * e.commitCap && e.peakBg >= 200);
     if (clipped.length >= 2)
       hints.push({ lever: "Confirmed cap (U)", dir: "consider a modest raise",
-        why: `${clipped.length} commit-shots were clipped at the cap (${fc.fcap}U) on episodes that still peaked ≥200.` });
+        why: `${clipped.length} commit-shots were clipped at the cap (now ${fc.fcap}U) on episodes that still peaked ≥200.` });
   }
-  // 3. committed cap binding while still rising high
-  const cc = cycles.find(c => c.ccap !== null);
+  // 3. committed cap binding while still rising high (same per-cycle rule as 2)
+  const cc = cycles.filter(c => c.ccap !== null).pop();
   if (cc) {
-    const pinned = cycles.filter(c => c.state === "COMMITTED" && c.fd !== null && c.fd >= 0.95 * cc.ccap && (c.bg || 0) > 180);
+    const pinned = cycles.filter(c => c.state === "COMMITTED" && c.fd !== null && c.ccap !== null && c.ccap >= cc.ccap &&
+      c.fd >= 0.95 * c.ccap && (c.bg || 0) > 180);
     if (pinned.length >= 4)
       hints.push({ lever: "Committed cap (U)", dir: "consider a modest raise",
-        why: `${pinned.length} COMMITTED holding cycles were pinned at the cap (${cc.ccap}U) while BG was above 180.` });
+        why: `${pinned.length} COMMITTED holding cycles were pinned at the cap (now ${cc.ccap}U) while BG was above 180.` });
   }
   // 4. events where V6's dosing was the low-side pressure → gentler V6 (v6ExtraU is the
   //    absorbed V6-minus-V1 insulin before the nadir, computed per-cycle — mode-independent)

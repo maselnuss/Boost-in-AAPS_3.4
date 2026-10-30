@@ -194,4 +194,13 @@ class StepFeedTest {
             )
         ).isFalse()
     }
+
+    @Test fun `a genuine wake this morning stands the lie-in failsafe down - 2026-10-15`() {
+        // Detector AWAKE on HR + steps inside the lie-in, 60-min steps still under the threshold.
+        assertThat(StepFeed.lieInFailsafeEngages(sleepInActive = true, nightModeEnabled = true, autoBySleepActive = true,
+            detectorSleeping = false, genuineWakeThisMorning = true)).isFalse()
+        // Without a genuine wake (boundary or resume-burst AWAKE) it still engages.
+        assertThat(StepFeed.lieInFailsafeEngages(sleepInActive = true, nightModeEnabled = true, autoBySleepActive = true,
+            detectorSleeping = false, genuineWakeThisMorning = false)).isTrue()
+    }
 }
