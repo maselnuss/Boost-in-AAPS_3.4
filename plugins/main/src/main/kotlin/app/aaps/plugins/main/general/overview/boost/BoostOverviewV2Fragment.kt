@@ -1226,7 +1226,7 @@ class BoostOverviewV2Fragment : DaggerFragment(), View.OnClickListener {
         binding.v2BtnCgm.visibility =
             (preferences.get(BooleanKey.OverviewShowCgmButton) && (xDripSource.isEnabled() || dexcomBoyda.isEnabled())).toVisibility()
 
-        binding.v2MealRow.visibility = preferences.get(BooleanKey.ApsBoostShowMealButton).toVisibility()
+        binding.v2BtnMeal.visibility = preferences.get(BooleanKey.ApsBoostShowMealButton).toVisibility()
 
         // Show the included standard layout when accept-temp, quick-wizard, or any user action is present.
         val anyVisible = binding.v2ButtonsLayout.acceptTempButton.visibility == View.VISIBLE ||
@@ -1240,7 +1240,7 @@ class BoostOverviewV2Fragment : DaggerFragment(), View.OnClickListener {
     private fun arrangeActionButtons() {
         ButtonGrid.arrange(
             binding.v2ActionButtons,
-            listOf(binding.v2BtnInsulin, binding.v2BtnCalculator, binding.v2BtnCarbs, binding.v2BtnTreatment, binding.v2BtnCalibration, binding.v2BtnCgm),
+            listOf(binding.v2BtnMeal, binding.v2BtnInsulin, binding.v2BtnCalculator, binding.v2BtnCarbs, binding.v2BtnTreatment, binding.v2BtnCalibration, binding.v2BtnCgm),
             gapPx = rh.dpToPx(8), rowGapPx = rh.dpToPx(8)
         )
     }
