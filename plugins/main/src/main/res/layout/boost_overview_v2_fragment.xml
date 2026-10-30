@@ -844,8 +844,8 @@
                 android:gravity="center"
                 android:paddingStart="4dp"
                 android:paddingEnd="4dp"
-                android:paddingTop="10dp"
-                android:paddingBottom="10dp">
+                android:paddingTop="6dp"
+                android:paddingBottom="6dp">
 
                 <ImageView
                     android:id="@+id/v2_btn_meal_icon"
@@ -890,8 +890,8 @@
                 android:gravity="center"
                 android:paddingStart="4dp"
                 android:paddingEnd="4dp"
-                android:paddingTop="10dp"
-                android:paddingBottom="10dp">
+                android:paddingTop="6dp"
+                android:paddingBottom="6dp">
 
                 <ImageView
                     android:layout_width="20dp"
@@ -934,8 +934,8 @@
                 android:gravity="center"
                 android:paddingStart="4dp"
                 android:paddingEnd="4dp"
-                android:paddingTop="10dp"
-                android:paddingBottom="10dp">
+                android:paddingTop="6dp"
+                android:paddingBottom="6dp">
 
                 <ImageView
                     android:layout_width="20dp"
@@ -979,8 +979,8 @@
                 android:gravity="center"
                 android:paddingStart="4dp"
                 android:paddingEnd="4dp"
-                android:paddingTop="10dp"
-                android:paddingBottom="10dp">
+                android:paddingTop="6dp"
+                android:paddingBottom="6dp">
 
                 <ImageView
                     android:layout_width="20dp"
@@ -1024,8 +1024,8 @@
                 android:gravity="center"
                 android:paddingStart="4dp"
                 android:paddingEnd="4dp"
-                android:paddingTop="10dp"
-                android:paddingBottom="10dp">
+                android:paddingTop="6dp"
+                android:paddingBottom="6dp">
 
                 <ImageView
                     android:layout_width="20dp"
@@ -1069,8 +1069,8 @@
                 android:gravity="center"
                 android:paddingStart="4dp"
                 android:paddingEnd="4dp"
-                android:paddingTop="10dp"
-                android:paddingBottom="10dp">
+                android:paddingTop="6dp"
+                android:paddingBottom="6dp">
 
                 <ImageView
                     android:layout_width="20dp"
@@ -1114,8 +1114,8 @@
                 android:gravity="center"
                 android:paddingStart="4dp"
                 android:paddingEnd="4dp"
-                android:paddingTop="10dp"
-                android:paddingBottom="10dp">
+                android:paddingTop="6dp"
+                android:paddingBottom="6dp">
 
                 <ImageView
                     android:layout_width="20dp"
